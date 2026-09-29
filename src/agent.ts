@@ -1,0 +1,401 @@
+// Handles one OpenCode chat request end to end:
+//   OpenCode request -> strategy adapter -> model -> validation/repair/guard
+//   -> OpenAI-format tool calls or text back to OpenCode.
+// OpenCode stays the tool executor: this module only decides what to send back.
+
+import crypto from "node:crypto";
+import type { Config, Profile } from "./config.ts";
+import type { ChatMessage } from "./messages.ts";
+import { currentObjective, estimateTokens, findWorkingDirectory, fitContext, normalizeHistory, textOf } from "./messages.ts";
+import { resolveTarget } from "./openwebui.ts";
+import type { ToolDef } from "./harmony.ts";
+import { interpretHarmony, stripHarmonyTokens } from "./harmony.ts";
+import { validateToolCall, type ValidCall } from "./toolcall.ts";
+import { analyzeTurn, canonicalKey, findRedundant, redundantHint, isErrorResult, type Step } from "./guard.ts";
+import { adapterFor, type Adapter } from "./strategies.ts";
+import { compactTools } from "./compact.ts";
+import { addUsage, callModel, costUSD, UpstreamError, type Usage } from "./upstream.ts";
+import type { ChatEmitter } from "./emitter.ts";
+import type { Logger } from "./log.ts";
+import { hashOf, logArgs, logText, truncate } from "./log.ts";
+
+export interface ChatRequest {
+  model?: string;
+  messages: ChatMessage[];
+  tools?: ToolDef[];
+  tool_choice?: unknown;
+  stream?: boolean;
+  max_tokens?: number;
+  max_completion_tokens?: number;
+  temperature?: number;
+  top_p?: number;
+  reasoning_effort?: string;
+  [k: string]: unknown;
+}
+
+export interface Outcome {
+  finish: "stop" | "tool_calls" | "length";
+  calls: (ValidCall & { id: string })[];
+  text: string;
+  modelCalls: number;
+  usage?: Usage;
+  diagnostic?: string;
+  strategy: string;
+}
+
+/** Native tool support learned at runtime for `auto` profiles. */
+export const nativeSupport = new Map<string, boolean>();
+
+const PASSTHROUGH_KEYS = ["temperature", "top_p", "reasoning_effort", "seed", "frequency_penalty", "presence_penalty"];
+
+export function newCallId(): string {
+  return `call_${crypto.randomBytes(9).toString("base64url")}`;
+}
+
+function pickStrategy(p: Profile): Adapter {
+  if (p.strategy === "auto") return adapterFor(nativeSupport.get(p.name) === false ? p.fallbackStrategy : "native");
+  return adapterFor(p.strategy);
+}
+
+export interface RunContext {
+  cfg: Config;
+  profile: Profile;
+  logger: Logger;
+  session: string;
+  reqId: string;
+  emitter: ChatEmitter;
+  signal: AbortSignal;
+  fetchImpl?: typeof fetch;
+}
+
+function diagnostic(message: string): string {
+  return `[gpt-oss-proxy] ${message}`;
+}
+
+/** Logs the tool results OpenCode sent back for the previous step(s). */
+function logToolResults(ctx: RunContext, messages: ChatMessage[]) {
+  const names = new Map<string, string>();
+  for (const m of messages) for (const tc of m.tool_calls ?? []) names.set(tc.id, tc.function.name);
+  // Only results after the last assistant message that had no tool results yet.
+  let i = messages.length - 1;
+  const fresh: ChatMessage[] = [];
+  while (i >= 0 && messages[i].role === "tool") fresh.unshift(messages[i--]);
+  for (const m of fresh) {
+    const text = textOf(m.content);
+    ctx.logger.event(ctx.session, "tool_result", {
+      req: ctx.reqId,
+      tool_call_id: m.tool_call_id,
+      name: names.get(m.tool_call_id ?? ""),
+      isError: isErrorResult(text),
+      chars: text.length,
+      // Error texts (OpenCode messages) are kept for diagnosis; successful results only with content logging.
+      preview: ctx.cfg.logContent || isErrorResult(text) ? truncate(text, 300) : undefined,
+    });
+  }
+}
+
+export async function runChat(req: ChatRequest, ctx: RunContext): Promise<Outcome> {
+  const { cfg, profile, logger, session, reqId, emitter } = ctx;
+  const limits = cfg.limits;
+  const t0 = Date.now();
+  const deadline = t0 + limits.requestBudgetMs;
+  const tools = (req.tools ?? []).filter((t) => t?.function?.name);
+  const messages = req.messages ?? [];
+  const passthrough: Record<string, unknown> = {};
+  for (const k of PASSTHROUGH_KEYS) if (req[k] !== undefined) passthrough[k] = req[k];
+  const requested = req.max_completion_tokens ?? req.max_tokens ?? profile.maxOutputTokens;
+  const maxTokens = Math.min(requested, profile.maxOutputTokens);
+
+  const toolsHash = tools.length ? logger.catalog(session, tools) : undefined;
+  // Tools as shown to the model; validation always uses OpenCode's originals.
+  const compaction = profile.toolDescriptions === "compact" && tools.length ? compactTools(tools) : undefined;
+  const shownTools = compaction?.tools ?? tools;
+  logToolResults(ctx, messages);
+
+  let adapter = tools.length ? pickStrategy(profile) : adapterFor("harmony");
+  const normalized = normalizeHistory(messages);
+  const analysis = analyzeTurn(normalized);
+  const cwd = findWorkingDirectory(messages);
+  const objective = currentObjective(messages);
+  // What the user, OpenCode and successful tool results actually said (not the model's own
+  // tool arguments): used to tell a mentioned path from an invented one.
+  const grounded = messages
+    .filter((m) => m.role === "system" || m.role === "user" || (m.role === "tool" && !isErrorResult(textOf(m.content))))
+    .map((m) => textOf(m.content))
+    .join("\n");
+  logger.event(session, "request", {
+    req: reqId,
+    profile: profile.name,
+    provider: profile.baseURL,
+    model: profile.model,
+    requestedModel: req.model,
+    strategy: tools.length ? adapter.name : "plain",
+    messages: messages.length,
+    tools: tools.map((t) => t.function.name),
+    toolsHash,
+    toolDescriptions: compaction ? { compacted: compaction.compacted, chars: [compaction.before, compaction.after] } : undefined,
+    stream: !!req.stream,
+    maxTokens,
+    turnSteps: analysis.steps.length,
+    consecutiveErrors: analysis.consecutiveErrors,
+    redundantExecuted: analysis.redundantExecuted,
+    objective: logText(objective, cfg.logContent, 300),
+    cwd,
+  });
+
+  let usage: Usage | undefined;
+  let modelCalls = 0;
+  const finish = (o: Omit<Outcome, "modelCalls" | "usage" | "strategy" | "calls"> & { calls: ValidCall[] }): Outcome => {
+    const calls = o.calls.map((c) => ({ ...c, id: newCallId() }));
+    const out: Outcome = { ...o, calls, modelCalls, usage, strategy: tools.length ? adapter.name : "plain" };
+    logger.event(session, "response", {
+      req: reqId,
+      finish: out.finish,
+      calls: out.calls.map((c) => ({ id: c.id, name: c.name, args: logArgs(c.argsJson, cfg.logContent, 500) })),
+      textChars: out.text.length,
+      text: cfg.logContent ? truncate(out.text, 400) : undefined,
+      diagnostic: out.diagnostic,
+      modelCalls,
+      ms: Date.now() - t0,
+      usage,
+      costUSD: costUSD(usage, profile),
+      strategy: out.strategy,
+    });
+    return out;
+  };
+  const stop = (reason: string, kind: string): Outcome => {
+    logger.event(session, "guard_stop", { req: reqId, kind, reason });
+    return finish({ finish: "stop", calls: [], text: diagnostic(reason), diagnostic: kind });
+  };
+
+  // ---- turn-level guards (bounded execution) ----
+  if (tools.length) {
+    if (analysis.steps.length >= limits.maxStepsPerTurn) {
+      return stop(`Stopped after ${analysis.steps.length} tool steps in this turn (limit ${limits.maxStepsPerTurn}). The task may be too large for one turn or the model is looping; review the steps above, then send a follow-up message to continue.`, "step_budget");
+    }
+    if (analysis.redundantExecuted >= limits.maxRedundantPerTurn) {
+      const reps = analysis.steps.filter((s) => s.redundant).map((s) => truncate(s.key, 120));
+      return stop(`Stopped: the model repeated identical tool calls ${analysis.redundantExecuted} times without any change in between (${[...new Set(reps)].join("; ")}). This looks like a loop; please rephrase the request or give more specific guidance.`, "repeated_calls");
+    }
+    if (analysis.consecutiveErrors >= limits.maxConsecutiveErrors) {
+      return stop(`Stopped after ${analysis.consecutiveErrors} consecutive failing tool calls. Last error: ${truncate(analysis.steps[analysis.steps.length - 1]?.result ?? "", 300)}`, "consecutive_errors");
+    }
+  }
+
+  const notes: string[] = [];
+  if (analysis.consecutiveErrors >= 3) {
+    notes.push(`The last ${analysis.consecutiveErrors} tool calls failed. Stop and reconsider: re-read the relevant file or check the path before trying again, and do not repeat a failing call unchanged.`);
+  }
+  const prompt = { cwd, objective, notes };
+
+  // Context guard: the proxy adds rules + the tool namespace that OpenCode does not
+  // count, so keep the history within the provider window (oldest results first).
+  const reserve = maxTokens + Math.ceil(JSON.stringify(shownTools).length / 3.2) + 1500;
+  const fitted = fitContext(messages, Math.max(4000, profile.contextWindow - reserve));
+  if (fitted.trimmed) logger.event(session, "context_trimmed", { req: reqId, trimmed: fitted.trimmed, estTokens: [fitted.before, fitted.after], window: profile.contextWindow });
+  const history = fitted.messages;
+
+  // Backend-specific endpoint and payload adjustments (OpenWebUI route selection).
+  const target = await resolveTarget(profile, ctx.fetchImpl);
+  if (target.route) logger.event(session, "route", { req: reqId, route: target.route, ownedBy: target.ownedBy, baseURL: target.profile.baseURL, note: target.note });
+  let truncationWarned = false;
+
+  const extra: ChatMessage[] = [];
+  let repairs = 0;
+  let hints = 0;
+  let empties = 0;
+  // Tool whose call was just rejected as invalid; a bare JSON reply right after is its corrected arguments.
+  let pendingRepairTool: string | undefined;
+  // Calls accepted earlier in this same response also count for redundancy checks.
+  const steps: Step[] = [...analysis.steps];
+
+  for (let iteration = 0; iteration < 12; iteration++) {
+    if (ctx.signal.aborted) return finish({ finish: "stop", calls: [], text: "", diagnostic: "client_aborted" });
+    if (Date.now() > deadline - 2000) {
+      return stop(`Gave up after ${Math.round((Date.now() - t0) / 1000)}s (request budget ${Math.round(limits.requestBudgetMs / 1000)}s) with ${modelCalls} model calls. The provider may be slow or overloaded; try again.`, "request_budget");
+    }
+    const body = target.patchBody(
+      tools.length
+        ? adapter.build({ messages: history, tools: shownTools, toolChoice: req.tool_choice, prompt, maxTokens, extra, passthrough })
+        : { ...passthrough, messages: normalizeHistory(history), max_tokens: maxTokens },
+    );
+    if (process.env.GPT_OSS_DUMP_REQUESTS) logger.dump(session, `${reqId}-${iteration}`, { profile: profile.name, tools, body });
+
+    let result;
+    const callStart = Date.now();
+    let reasoningStarted = false;
+    try {
+      modelCalls++;
+      result = await callModel({
+        profile: target.profile,
+        limits,
+        body,
+        signal: ctx.signal,
+        deadline,
+        fetchImpl: ctx.fetchImpl,
+        onReasoning: (d) => {
+          if (!reasoningStarted && iteration > 0) emitter.reasoning("\n\n");
+          reasoningStarted = true;
+          emitter.reasoning(d);
+        },
+        onAttempt: (a) => {
+          logger.event(session, a.ok ? "upstream_ok" : "upstream_error", { req: reqId, iteration, ...a });
+          // Let the user see why nothing is happening (shown in OpenCode's thinking area).
+          if (!a.ok && a.willRetry && (a.kind === "rate_limit" || a.status === 503))
+            emitter.reasoning(`\n[gpt-oss-proxy] provider is rate limiting (${a.status}); retrying in ${Math.round((a.backoffMs ?? 0) / 1000)}s…\n`);
+        },
+      });
+    } catch (e) {
+      const err = e as UpstreamError;
+      if (err.kind === "tools_unsupported" && profile.strategy === "auto" && adapter.name === "native") {
+        nativeSupport.set(profile.name, false);
+        adapter = adapterFor(profile.fallbackStrategy);
+        logger.event(session, "strategy_fallback", { req: reqId, from: "native", to: adapter.name, reason: err.message });
+        modelCalls--;
+        continue;
+      }
+      if (err.kind === "aborted") return finish({ finish: "stop", calls: [], text: "", diagnostic: "client_aborted" });
+      if (err.kind === "tool_parse" && repairs < limits.repairAttempts) {
+        // The model server could not parse the model's tool-call arguments: ask the model to resend them.
+        repairs++;
+        logger.event(session, "validation_failure", { req: reqId, code: "bad_json", tool: "(server-side parse)", error: err.message, attempt: repairs });
+        adapter.nudge(extra, `Your previous function call could not be parsed (${truncate(err.message, 400)}). Call the function again with arguments that are one valid JSON object.`);
+        continue;
+      }
+      const owui = profile.kind === "openwebui";
+      const hint =
+        err.kind === "tools_unsupported"
+          ? ` This provider does not support native tool calling for ${profile.model}; set "strategy": "harmony" (or "auto") for profile "${profile.name}".`
+          : err.kind === "auth" && owui
+          ? ` Check ${profile.apiKeyEnv ?? "the API key"} for profile "${profile.name}". In OpenWebUI: enable API keys (Admin Panel > Settings > General, or ENABLE_API_KEYS=True), give the key's user the API-keys permission, and if API-key endpoint restrictions are on allow /api/models, /api/chat/completions and /ollama/v1/chat/completions.`
+          : err.kind === "auth"
+          ? ` Check the API key environment variable ${profile.apiKeyEnv ?? "(apiKeyEnv)"} for profile "${profile.name}".`
+          : owui && /not found/i.test(err.message)
+          ? ` The model id "${profile.model}" must match an OpenWebUI model id exactly (see /api/models) and the key's user must have access to it.`
+          : err.kind === "context_length"
+            ? " The conversation is too long for the model; run /compact in OpenCode or start a new session."
+            : err.kind === "timeout"
+              ? " The provider did not respond in time; limits can be raised in gpt-oss-proxy.config.json (limits.requestTimeoutMs, firstByteTimeoutMs, idleTimeoutMs)."
+              : "";
+      return stop(`Model provider "${profile.name}" failed after ${err.attempts} attempt(s): ${err.message}.${hint}`, `upstream_${err.kind}`);
+    }
+    if (profile.strategy === "auto" && adapter.name === "native" && tools.length) nativeSupport.set(profile.name, true);
+    usage = addUsage(usage, result.usage);
+
+    // Silent context truncation (e.g. Ollama's default num_ctx of 4096 below 23 GiB VRAM): the
+    // provider reports how many prompt tokens it actually evaluated.
+    const sentTokens = estimateTokens((body.messages as ChatMessage[]) ?? []) + (body.tools ? Math.ceil(JSON.stringify(body.tools).length / 3.2) : 0);
+    const seen = result.usage?.prompt_tokens ?? 0;
+    if (seen > 0 && sentTokens > 3000 && seen < sentTokens * 0.6) {
+      logger.event(session, "context_truncated", { req: reqId, iteration, promptTokensSeen: seen, estimatedPromptTokens: sentTokens });
+      if (!truncationWarned) {
+        truncationWarned = true;
+        emitter.reasoning(
+          `\n[gpt-oss-proxy] the model server evaluated only ${seen} of ~${sentTokens} prompt tokens - its context window is too small, so instructions, tools or earlier results were cut. ${profile.kind === "openwebui" ? `Raise num_ctx (Ollama OLLAMA_CONTEXT_LENGTH, the model's num_ctx, or profile "numCtx" on the /api route) to at least 32768.` : "Raise the model's context length."}\n`,
+        );
+      }
+    }
+
+    const sep = iteration > 0 && !reasoningStarted ? "\n\n" : "";
+    if (!tools.length) {
+      const turn = interpretHarmony(result.reasoning, result.content);
+      const shown = reasoningStarted ? interpretHarmony("", result.content).reasoning : turn.reasoning;
+      if (shown) emitter.reasoning(sep + shown);
+      logger.event(session, "model_output", { req: reqId, iteration, ms: Date.now() - callStart, finish: result.finishReason, usage: result.usage, content: cfg.logContent ? truncate(result.content, 4000) : undefined });
+      return finish({ finish: result.finishReason === "length" ? "length" : "stop", calls: [], text: turn.text || stripHarmonyTokens(result.content).trim() });
+    }
+
+    const interp = adapter.interpret(result);
+    logger.event(session, "model_output", {
+      req: reqId,
+      iteration,
+      ms: Date.now() - callStart,
+      firstByteMs: result.firstByteMs,
+      finish: result.finishReason,
+      usage: result.usage,
+      reasoningChars: result.reasoning.length,
+      content: cfg.logContent ? truncate(result.content, 6000) : undefined,
+      proposed: interp.calls.map((c) => ({ name: c.name, args: logArgs(typeof c.args === "string" ? c.args : JSON.stringify(c.args), cfg.logContent, 800) })),
+      textChars: interp.text.length,
+      notes: interp.notes.length ? interp.notes : undefined,
+    });
+    const shownReasoning = reasoningStarted ? interp.contentReasoning : interp.reasoning;
+    if (shownReasoning) emitter.reasoning(sep + shownReasoning);
+
+    if (interp.protocolError && !interp.calls.length) {
+      if (repairs < limits.repairAttempts) {
+        repairs++;
+        logger.event(session, "validation_failure", { req: reqId, code: "protocol", error: interp.protocolError, raw: logText(result.content, cfg.logContent, 1000) });
+        extra.push({ role: "assistant", content: truncate(result.content, 4000) });
+        adapter.nudge(extra, interp.protocolError);
+        continue;
+      }
+      if (interp.text.trim()) return finish({ finish: "stop", calls: [], text: interp.text.trim() });
+    }
+
+    if (!interp.calls.length && pendingRepairTool && /^\{[\s\S]*\}$/.test(interp.text.trim())) {
+      // Answering a correction, the model sometimes resends only the JSON arguments
+      // without addressing the function. Scoped to the tool that was just rejected.
+      interp.calls.push({ name: pendingRepairTool, args: interp.text.trim() });
+      interp.text = "";
+      logger.event(session, "call_repaired", { req: reqId, tool: pendingRepairTool, repairs: ["bare JSON reply after a rejected call used as its arguments"] });
+    }
+    pendingRepairTool = undefined;
+
+    if (interp.calls.length) {
+      const valid: ValidCall[] = [];
+      let rejected = false;
+      for (const proposed of interp.calls) {
+        const v = validateToolCall(proposed, tools, cwd, grounded);
+        if (!v.ok) {
+          logger.event(session, "validation_failure", { req: reqId, code: v.code, tool: v.name, error: v.error, rawArgs: logText(v.rawArgs, cfg.logContent, 1000), attempt: repairs + 1 });
+          if (repairs < limits.repairAttempts) {
+            repairs++;
+            adapter.feedback(extra, { name: v.name, rawArgs: v.rawArgs }, `Error: ${v.error}`, newCallId());
+            pendingRepairTool = v.code === "unknown_tool" ? undefined : v.name;
+            rejected = true;
+            break;
+          }
+          return stop(`The model produced an invalid tool call ${repairs + 1} times in a row and was stopped. Last problem: ${v.error}`, `invalid_call_${v.code}`);
+        }
+        if (v.call.repairs.length) logger.event(session, "call_repaired", { req: reqId, tool: v.call.name, repairs: v.call.repairs });
+        const key = canonicalKey(v.call.name, v.call.args);
+        const prev = findRedundant(steps, key, v.call.args);
+        if (prev) {
+          if (hints < limits.redundantHints) {
+            hints++;
+            logger.event(session, "redundant_call", { req: reqId, tool: v.call.name, key: cfg.logContent ? truncate(key, 300) : hashOf(key), action: "hint", hint: hints });
+            adapter.feedback(extra, { name: v.call.name, rawArgs: v.call.argsJson }, redundantHint(prev), newCallId());
+            rejected = true;
+            break;
+          }
+          logger.event(session, "redundant_call", { req: reqId, tool: v.call.name, key: cfg.logContent ? truncate(key, 300) : hashOf(key), action: "passthrough" });
+        }
+        valid.push(v.call);
+        steps.push({ name: v.call.name, key, args: v.call.args, result: "", isError: false, redundant: !!prev });
+      }
+      if (rejected) continue;
+      return finish({ finish: "tool_calls", calls: valid, text: interp.text });
+    }
+
+    if (interp.text.trim()) {
+      return finish({ finish: result.finishReason === "length" ? "length" : "stop", calls: [], text: interp.text });
+    }
+
+    // Neither a call nor text (e.g. only reasoning, or output cut at the token limit).
+    logger.event(session, "empty_output", { req: reqId, iteration, finish: result.finishReason, reasoningChars: result.reasoning.length, contentChars: result.content.length });
+    if (empties < limits.emptyRetries) {
+      empties++;
+      adapter.nudge(
+        extra,
+        result.finishReason === "length"
+          ? "Your previous reply hit the output limit before producing an answer or a function call. Think briefly, then either call the next function or give the final answer."
+          : "Your previous reply contained neither a function call nor an answer. Continue the task: call the next function, or give the final answer if the request is complete.",
+      );
+      continue;
+    }
+    return stop(`The model returned no answer and no tool call (${modelCalls} attempts, last finish_reason=${result.finishReason}).`, "empty_output");
+  }
+  return stop(`Too many internal retries (${modelCalls} model calls) without a usable reply.`, "retry_budget");
+}
+

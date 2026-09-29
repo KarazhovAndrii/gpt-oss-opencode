@@ -1,0 +1,6 @@
+[project]
+name = "zoo-census"
+version = "0.3.0"
+
+[project.scripts]
+zoo = "app.__main__:main"

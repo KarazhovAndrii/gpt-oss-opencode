@@ -1,0 +1,30 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "gpt-oss/siliconflow",
+  "small_model": "gpt-oss/siliconflow",
+  "provider": {
+    "gpt-oss": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "GPT-OSS 20B (gpt-oss-proxy)",
+      "options": {
+        "baseURL": "http://127.0.0.1:8787/v1",
+        "apiKey": "unused-the-proxy-holds-the-provider-keys"
+      },
+      "models": {
+        "siliconflow": {
+          "name": "gpt-oss-20b via SiliconFlow",
+          "tool_call": true,
+          "reasoning": true,
+          "limit": { "context": 131072, "output": 8192 },
+          "cost": { "input": 0.04, "output": 0.18 }
+        },
+        "openwebui": {
+          "name": "gpt-oss-20b via OpenWebUI",
+          "tool_call": true,
+          "reasoning": true,
+          "limit": { "context": 131072, "output": 8192 }
+        }
+      }
+    }
+  }
+}

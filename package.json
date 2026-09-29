@@ -1,0 +1,33 @@
+{
+  "name": "gpt-oss-opencode",
+  "version": "0.1.0",
+  "description": "Makes GPT-OSS 20B a reliable tool-calling coding agent inside OpenCode (harmony-aware OpenAI-compatible proxy).",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "bin": {
+    "gpt-oss-proxy": "bin/gpt-oss-proxy.ts",
+    "gpt-oss-report": "bin/report.ts"
+  },
+  "scripts": {
+    "start": "node bin/gpt-oss-proxy.ts",
+    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "report": "node bin/report.ts",
+    "eval": "node eval/run.ts",
+    "test:live": "node --test --test-concurrency=1 \"test/live/*.test.ts\"",
+    "recheck": "node eval/recheck.ts",
+    "compare": "node eval/compare.ts"
+  },
+  "devDependencies": {
+    "@ai-sdk/openai-compatible": "^2.0.78",
+    "@opencode-ai/plugin": "^1.18.29",
+    "@types/node": "^24.13.6",
+    "ai": "^6.0.290",
+    "typescript": "^5.9.3",
+    "zod": "^4.6.5"
+  }
+}

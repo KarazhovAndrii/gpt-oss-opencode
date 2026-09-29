@@ -1,0 +1,9 @@
+key.txt
+node_modules/
+logs/
+.eval-runs/
+*.log
+.env
+.local-stack/
+# Eval fixtures contain deliberate .log files (big-log scenario).
+!eval/fixtures/**/*.log

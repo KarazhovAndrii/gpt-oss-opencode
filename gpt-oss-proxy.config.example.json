@@ -1,0 +1,54 @@
+{
+  "host": "127.0.0.1",
+  "port": 8787,
+  "defaultProfile": "siliconflow",
+  "logDir": "logs",
+  "logContent": false,
+  "logRetentionDays": 14,
+  "profiles": {
+    "siliconflow": {
+      "baseURL": "https://api.siliconflow.com/v1",
+      "model": "openai/gpt-oss-20b",
+      "apiKeyEnv": "SILICONFLOW_API_KEY",
+      "strategy": "harmony",
+      "stream": false,
+      "maxOutputTokens": 8192,
+      "contextWindow": 131072,
+      "pricing": {
+        "input": 0.04,
+        "output": 0.18
+      },
+      "toolDescriptions": "compact"
+    },
+    "openwebui": {
+      "kind": "openwebui",
+      "openwebuiRoute": "auto",
+      "baseURL": "http://localhost:8080/api",
+      "model": "gpt-oss20b-opencode",
+      "apiKeyEnv": "OPENWEBUI_API_KEY",
+      "strategy": "auto",
+      "fallbackStrategy": "harmony",
+      "stream": true,
+      "maxOutputTokens": 8192,
+      "contextWindow": 131072,
+      "extraBody": {},
+      "toolDescriptions": "compact",
+      "//numCtx": "route \"api\" only: e.g. 32768 is sent as options.num_ctx; on route \"ollama-v1\" set OLLAMA_CONTEXT_LENGTH on the Ollama server instead"
+    }
+  },
+  "limits": {
+    "firstByteTimeoutMs": 60000,
+    "idleTimeoutMs": 45000,
+    "requestTimeoutMs": 180000,
+    "transportRetries": 3,
+    "rateLimitRetries": 8,
+    "rateLimitBackoffMs": 5000,
+    "repairAttempts": 2,
+    "redundantHints": 2,
+    "emptyRetries": 1,
+    "maxRedundantPerTurn": 3,
+    "maxConsecutiveErrors": 8,
+    "maxStepsPerTurn": 60,
+    "requestBudgetMs": 420000
+  }
+}
