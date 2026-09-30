@@ -10,58 +10,47 @@ hosted API, your own GPU server, or a gateway such as OpenWebUI, as long as it m
 
 ## Why it's useful
 
-- **A coding agent on open-weight models, with no lock-in.** GPT-OSS models are
-  Apache-2.0 open weights. You choose who runs them (a hosted API, your company's GPU
-  server, or your own machine) and switch providers by changing configuration, not code.
-- **Your code can stay in-house.** Self-host the model, for example behind OpenWebUI, and
-  the code the agent reads is sent only to your own model server. gpt-oss-20b runs on a single
-  16 GB GPU, which fits many teams with privacy or compliance requirements.
-- **It costs very little to run.** On a hosted API, a small feature with tests cost about
-  **half a cent** in a [real session](#a-first-task), and the full 16-scenario evaluation
-  about **$0.05–0.07** per run with gpt-oss-20b.
-- **It works where the direct setup doesn't.** Without the proxy, some providers refuse
-  tool calls for GPT-OSS outright, so OpenCode can't use the model as an agent at all.
-  With it, gpt-oss-20b passed **14 of 15** live coding scenarios, and about 95% of its
-  tool calls were valid on the first try; the rest were repaired automatically.
-- **Nothing new to learn.** You keep OpenCode's terminal UI, sessions, permission
-  prompts and tools. The proxy is invisible once it runs, or OpenCode can start it for you.
-- **You can check every claim.** The results come from a live evaluation harness in
-  this repository, which you can re-run against your own provider before you rely on it
-  ([validation report](docs/VALIDATION_REPORT.md)).
+**OpenCode and GPT-OSS don't work together out of the box. This proxy is what makes them work.**
 
-**Who it's for:**
+OpenCode runs its agent entirely through tool calls. Every step (reading a file, editing
+it, running the tests) must arrive from the model as a well-formed OpenAI `tool_calls`
+message that matches OpenCode's tool schemas. GPT-OSS was trained on its own tool-call
+format ("harmony"), and the providers and gateways in between break that exchange in
+several ways. We measured each failure. Here is what goes wrong without the proxy and
+what it does instead:
 
-- developers who want a capable coding agent without depending on a closed model vendor;
-- teams that must keep source code on their own infrastructure;
-- organisations that already run OpenWebUI or Ollama and want to reuse them for coding;
-- students, hobbyists and anyone on a budget;
-- people who build or research agents and want a measured, reproducible setup.
+| Without gpt-oss-opencode | With it |
+|---|---|
+| **The agent can't start.** SiliconFlow rejects tool calling for GPT-OSS (`HTTP 400 "Function call is not supported for this model"`, for both gpt-oss-20b and gpt-oss-120b), so OpenCode can't run a single step. | The proxy writes OpenCode's tools into the model's own harmony format and parses the calls from its raw output. **14 of 15** live coding scenarios pass. |
+| **The usual workaround fails.** Prompting the model to reply with JSON tool calls passed **0 of 6** scenarios: the model mostly answered from imagination without reading a single file. | Speaking the format the model was trained on passed 4 of the same 6 with the prompt of that time; the final version passes 14 of 15 on the full suite. |
+| **Streamed calls arrive corrupted.** SiliconFlow's stream duplicates tokens after harmony markers (`<\|channel\|>commentcomment…`), producing invalid calls: **0 of 2** scenarios. | The proxy reads the provider without streaming and streams to OpenCode itself: 2 of 2. |
+| **Self-hosting fails silently.** OpenWebUI strips the tool name from tool results, ignores `max_tokens` (5 requested, 321 generated), and turns Ollama errors into empty answers. Ollama's default context (4K tokens on GPUs under 23 GiB) cuts the conversation without an error: the model saw 1,026 of 4,403 prompt tokens and stopped calling tools. | The proxy picks OpenWebUI's lossless route, compensates for the dropped fields, retries hidden errors, and warns in OpenCode when the server truncated the conversation. |
+| **OpenCode uses the wrong system prompt.** For a model id containing "gpt", OpenCode's prompt demands an `apply_patch` tool that it doesn't offer to "oss" models. | The shipped config uses neutral model ids, and the proxy maps them to the real model. |
+| **The model's own mistakes derail sessions.** Malformed calls (`globjson`, arguments inside the tool name, a bare `to=functions.read?` returned as the "answer"). Long file paths retyped with wrong digits: OpenCode denies them as outside the project, and the model starts reasoning about permissions. A timed-out polling loop re-run with a 10-minute timeout. Tool results the model invented instead of waiting for. | Every call is checked against OpenCode's tool schemas before OpenCode sees it. Broken calls are repaired or sent back with the exact error, mistyped paths are corrected when unambiguous, loops are cut off, and invented results are discarded. About 95% of calls are valid on the first try and the rest are repaired; in the final runs, no turn had to be stopped. |
 
-It is honest about limits: the agent handles everyday coding tasks well, but larger or
-subtler work needs your review (see [What to expect](#what-to-expect)).
+**The result:** GPT-OSS works as an OpenCode agent on providers where it otherwise can't run
+at all, and the silent failures of self-hosted gateways are handled for you. You keep
+OpenCode exactly as it is. All 33 failure modes found and fixed are documented, with
+evidence, in the [validation report](docs/VALIDATION_REPORT.md).
 
-## What it fixes
+**Who it's for:** anyone who wants gpt-oss-20b or gpt-oss-120b as their OpenCode agent,
+especially:
 
-Connecting OpenCode directly to GPT-OSS doesn't work well, and the problems are the same
-for gpt-oss-20b and gpt-oss-120b. Some providers reject tool calling for these models,
-gateways drop parts of the conversation, and the model itself sometimes emits malformed
-calls, invents file paths or repeats itself. **gpt-oss-opencode** is a small proxy that
-runs on your machine between OpenCode and the provider and fixes that plumbing:
+- on a provider that doesn't offer function calling for GPT-OSS;
+- on a self-hosted OpenWebUI or Ollama server;
+- people building agents on small open models, who can use the documented failure modes
+  and fixes.
 
-- **It makes tool calls work with any provider.** It uses the provider's native function
-  calling when available, and otherwise emulates it in gpt-oss's own "harmony" format.
-- **It checks every call** against OpenCode's tool definitions, repairs or re-asks bad
-  ones, stops loops, and retries provider failures.
-- **It is provider-neutral.** A generic `custom` profile covers any OpenAI-compatible
-  endpoint. Two presets cover tested providers with quirks: SiliconFlow (hosted) and
-  OpenWebUI in front of Ollama (self-hosted).
-- **It covers both model sizes.** gpt-oss-20b is fully evaluated. gpt-oss-120b passed the
-  end-to-end tool check through the same proxy ([model sizes](#model-sizes-20b-and-120b)).
-- Node.js ≥ 22.18, no runtime dependencies, MIT license.
+The agent handles everyday coding tasks well; larger or subtler work still needs your
+review (see [What to expect](#what-to-expect)).
+
+**At a glance:** works with any OpenAI-compatible provider (generic `custom` profile, plus
+tested presets for SiliconFlow and OpenWebUI) · gpt-oss-20b fully evaluated, gpt-oss-120b
+verified end to end ([model sizes](#model-sizes-20b-and-120b)) · Node.js ≥ 22.18, no
+runtime dependencies · MIT license.
 
 **Contents:**
 [Why it's useful](#why-its-useful) ·
-[What it fixes](#what-it-fixes) ·
 [Quick setup](#quick-setup) ·
 [Example usage](#example-usage) ·
 [How the agent works](#how-the-agent-works) ·
