@@ -5,15 +5,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 `gpt-oss-opencode`: an OpenAI-compatible proxy that lets GPT-OSS 20B act as OpenCode's
-tool-calling agent model (SiliconFlow via harmony emulation, OpenWebUI via native tools
+tool-calling agent model, with the model supplied by any OpenAI-compatible provider that serves
+it (generic `custom` profile; tested presets: SiliconFlow via harmony emulation, OpenWebUI via native tools
 with fallback). OpenCode stays the tool executor; the proxy never touches repositories.
 Design and measurements: `docs/ARCHITECTURE.md`; test results: `docs/VALIDATION_REPORT.md`.
 
 ## Commands
 
-- `npm start` — run the proxy (`http://127.0.0.1:8787/v1`); needs `SILICONFLOW_API_KEY` (or `OPENWEBUI_API_KEY`).
+- `npm start` — run the proxy (`http://127.0.0.1:8787/v1`); point it at a provider with `CUSTOM_BASE_URL` (+ `CUSTOM_MODEL`, `CUSTOM_API_KEY`), or use a preset (`SILICONFLOW_API_KEY`, `OPENWEBUI_*`).
 - `npm test` — unit + contract tests (offline; mock provider + the AI SDK package OpenCode uses).
-- `npm run test:live` — live provider tests (skipped without keys; small cost).
+- `npm run test:live` — live provider tests, one per configured provider (`CUSTOM_BASE_URL`, `SILICONFLOW_API_KEY`, `OPENWEBUI_API_KEY`); small cost.
 - `npm run typecheck` — `tsc --noEmit` (TypeScript runs natively on Node ≥ 22.18 via type stripping; no build step).
 - `npm run eval -- [--only a,b] [--repeat N] [--concurrency 1] [--strategy harmony|json|native|auto] [--descriptions compact|full] [--extra-tools]` — live OpenCode evaluation; results in `.eval-runs/<run>/`.
 - `npm run recheck -- .eval-runs/<run>` — re-apply current checks to a saved eval run (no model calls).

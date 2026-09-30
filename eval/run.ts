@@ -2,7 +2,7 @@
 // provider, each in an isolated copy of a synthetic repository.
 //
 //   node eval/run.ts [--only id,id] [--skip id,id] [--strategy harmony|json|native|auto]
-//                    [--profile siliconflow] [--stream true|false] [--repeat N]
+//                    [--profile siliconflow|custom|openwebui|<name>] [--stream true|false] [--repeat N]
 //                    [--concurrency N] [--label name] [--extra-tools]
 //                    [--descriptions full|compact] [--reasoning low|medium|high]
 //
@@ -114,6 +114,7 @@ async function runScenario(sc: Scenario, n: number): Promise<ScenarioResult> {
   const cfg = loadConfig(process.env, ROOT);
   const profile = cfg.profiles[profileName];
   if (!profile) throw new Error(`unknown profile ${profileName}`);
+  if (!profile.baseURL) throw new Error(`profile ${profileName} has no base URL (set ${profileName.toUpperCase()}_BASE_URL)`);
   if (strategy) profile.strategy = strategy;
   if (streamOpt) profile.stream = streamOpt === "true";
   if (descriptions) profile.toolDescriptions = descriptions;

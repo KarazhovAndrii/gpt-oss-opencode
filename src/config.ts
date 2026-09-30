@@ -8,8 +8,12 @@
 //   GPT_OSS_LOG_DIR          directory for JSONL diagnostics
 //   GPT_OSS_LOG_CONTENT      1 = also log prompts, model output, tool arguments and result previews
 //   GPT_OSS_LOG_RETENTION_DAYS  delete log days older than this at startup and daily (0 = keep)
-//   <PROFILE>_BASE_URL / <PROFILE>_MODEL   e.g. OPENWEBUI_BASE_URL, SILICONFLOW_MODEL
+//   <PROFILE>_BASE_URL / <PROFILE>_MODEL   e.g. CUSTOM_BASE_URL, OPENWEBUI_MODEL
 //   <PROFILE>_CONTEXT_WINDOW  the model server's real context length (tokens)
+//
+// Profiles: "custom" (the default) is any OpenAI-compatible provider serving GPT-OSS 20B,
+// configured with CUSTOM_BASE_URL, CUSTOM_MODEL and CUSTOM_API_KEY (optional for local
+// servers). "siliconflow" and "openwebui" are presets for tested providers with quirks.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -112,6 +116,23 @@ export const DEFAULT_LIMITS: Limits = {
 };
 
 export const DEFAULT_PROFILES: Record<string, Profile> = {
+  // Any OpenAI-compatible endpoint that serves GPT-OSS 20B (requirements: README). Also the
+  // base for profiles added in a config file, so none of them inherits a vendor's quirks.
+  custom: {
+    name: "custom",
+    baseURL: "",
+    model: "openai/gpt-oss-20b",
+    apiKeyEnv: "CUSTOM_API_KEY",
+    // Native tool calls first; if the provider refuses tools, harmony emulation (remembered).
+    strategy: "auto",
+    fallbackStrategy: "harmony",
+    maxOutputTokens: 8192,
+    // A safe default: set CUSTOM_CONTEXT_WINDOW (and OpenCode's limit.context) to the real window.
+    contextWindow: 32768,
+    toolDescriptions: "compact",
+    stream: true,
+    aliases: [],
+  },
   siliconflow: {
     name: "siliconflow",
     baseURL: "https://api.siliconflow.com/v1",
@@ -129,7 +150,7 @@ export const DEFAULT_PROFILES: Record<string, Profile> = {
     // non-streaming output is clean, so call it without streaming; OpenCode still
     // receives a stream (with keepalives) from the proxy.
     stream: false,
-    aliases: ["gpt-oss-20b", "openai/gpt-oss-20b"],
+    aliases: [],
   },
   openwebui: {
     name: "openwebui",
@@ -154,7 +175,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
   const cfg: Config = {
     host: "127.0.0.1",
     port: 8787,
-    defaultProfile: "siliconflow",
+    defaultProfile: "custom",
     logDir: path.resolve(cwd, "logs"),
     logContent: false,
     logRetentionDays: 14,
@@ -175,7 +196,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
   if (env.GPT_OSS_LOG_CONTENT) cfg.logContent = /^(1|true|yes|on)$/i.test(env.GPT_OSS_LOG_CONTENT);
   if (env.GPT_OSS_LOG_RETENTION_DAYS) cfg.logRetentionDays = Number(env.GPT_OSS_LOG_RETENTION_DAYS);
   for (const p of Object.values(cfg.profiles)) {
-    const prefix = p.name.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+    const prefix = envPrefix(p);
     if (env[`${prefix}_BASE_URL`]) p.baseURL = env[`${prefix}_BASE_URL`]!;
     if (env[`${prefix}_MODEL`]) p.model = env[`${prefix}_MODEL`]!;
     if (env[`${prefix}_STRATEGY`]) p.strategy = env[`${prefix}_STRATEGY`] as Strategy;
@@ -196,7 +217,7 @@ function mergeConfig(cfg: Config, raw: any, baseDir: string) {
   if (raw.logDir) cfg.logDir = path.resolve(baseDir, raw.logDir);
   if (raw.limits) Object.assign(cfg.limits, raw.limits);
   for (const [name, p] of Object.entries<any>(raw.profiles ?? {})) {
-    const base = cfg.profiles[name] ?? { ...DEFAULT_PROFILES.siliconflow, name, pricing: undefined, aliases: [], apiKeyEnv: undefined };
+    const base = cfg.profiles[name] ?? { ...DEFAULT_PROFILES.custom, name, aliases: [], apiKeyEnv: undefined };
     cfg.profiles[name] = { ...base, ...p, name };
     if (p.apiKeyFile) cfg.profiles[name].apiKeyFile = path.resolve(baseDir, p.apiKeyFile);
   }
@@ -209,9 +230,14 @@ function validateConfig(cfg: Config) {
   }
   for (const p of Object.values(cfg.profiles)) {
     if (!["native", "harmony", "json", "auto"].includes(p.strategy)) throw new Error(`profile ${p.name}: invalid strategy ${p.strategy}`);
-    if (!/^https?:\/\//.test(p.baseURL)) throw new Error(`profile ${p.name}: baseURL must be http(s): ${p.baseURL}`);
+    // An empty baseURL means "not configured"; requests to such a profile get a diagnostic (server.ts).
+    if (p.baseURL && !/^https?:\/\//.test(p.baseURL)) throw new Error(`profile ${p.name}: baseURL must be http(s): ${p.baseURL}`);
     if (!(p.contextWindow >= 4096)) throw new Error(`profile ${p.name}: contextWindow must be a number >= 4096 (got ${p.contextWindow})`);
   }
+}
+
+export function envPrefix(p: Profile): string {
+  return p.name.toUpperCase().replace(/[^A-Z0-9]/g, "_");
 }
 
 /** Picks the profile for the model id OpenCode sent. */

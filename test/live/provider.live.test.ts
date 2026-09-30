@@ -1,5 +1,6 @@
 // Live provider tests (network, costs a few cents at most). Skipped unless the
-// provider's key is set:
+// provider is configured:
+//   CUSTOM_BASE_URL [+ CUSTOM_MODEL, CUSTOM_API_KEY]  -> any OpenAI-compatible GPT-OSS provider (auto strategy)
 //   SILICONFLOW_API_KEY                       -> SiliconFlow (harmony strategy)
 //   OPENWEBUI_API_KEY [+ OPENWEBUI_BASE_URL]  -> OpenWebUI (auto strategy)
 // Run: npm run test:live
@@ -83,12 +84,13 @@ async function chat(url: string, body: object) {
 }
 
 const providers = [
-  { name: "siliconflow", enabled: !!process.env.SILICONFLOW_API_KEY },
-  { name: "openwebui", enabled: !!process.env.OPENWEBUI_API_KEY },
+  { name: "custom", enabled: !!process.env.CUSTOM_BASE_URL, hint: "set CUSTOM_BASE_URL to run" },
+  { name: "siliconflow", enabled: !!process.env.SILICONFLOW_API_KEY, hint: "set SILICONFLOW_API_KEY to run" },
+  { name: "openwebui", enabled: !!process.env.OPENWEBUI_API_KEY, hint: "set OPENWEBUI_API_KEY to run" },
 ];
 
 for (const p of providers) {
-  describe(`live: ${p.name}`, { skip: !p.enabled && `set ${p.name.toUpperCase()}_API_KEY to run` }, () => {
+  describe(`live: ${p.name}`, { skip: !p.enabled && p.hint }, () => {
     let url = "";
     let close: () => Promise<void>;
     let logDir = "";

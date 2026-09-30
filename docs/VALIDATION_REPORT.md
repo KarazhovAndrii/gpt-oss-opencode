@@ -16,8 +16,11 @@ On every backend it validates each call against OpenCode's tool schemas, repairs
 re-prompts bad calls, stops loops, retries within budgets, and logs a diagnosable
 trace per session. OpenCode remains the only tool executor. See ARCHITECTURE.md.
 
-**Final default configuration (v7):** SiliconFlow profile, `harmony` strategy, non-streamed
-upstream, compact tool descriptions, provider-default reasoning effort, v7 operating rules.
+**Measured configuration (v7 and the release runs):** the SiliconFlow preset (`harmony`
+strategy, non-streamed upstream), compact tool descriptions, provider-default reasoning
+effort, v7 operating rules. The proxy itself is provider-neutral: its default profile,
+`custom`, takes any OpenAI-compatible GPT-OSS 20B provider with the `auto` strategy.
+SiliconFlow was the provider used for the live measurements.
 
 | Result | Value |
 |---|---|
@@ -29,7 +32,7 @@ upstream, compact tool descriptions, provider-default reasoning effort, v7 opera
 | Proxy stops / uncorrelated tool results (v7) | 0 / 0 |
 | Cost / tokens (v7, all 15 scenarios) | $0.038 · 736K input + 46K output tokens · 129 model calls |
 | Live lifecycle test on SiliconFlow (`npm run test:live`) | **pass**: glob → read test → read source → edit → `npm test` → correct answer (17.6 s) |
-| Offline tests (`npm test`) | **119/119** unit + contract tests (incl. real OpenWebUI captures, AI SDK client) |
+| Offline tests (`npm test`) | **124/124** unit + contract tests (incl. real OpenWebUI captures, AI SDK client) |
 | OpenWebUI 0.11.4 + Ollama 0.34.4 (real, local stand-in model) | lifecycle passes on both routes; OpenCode e2e 100% valid calls (15/15), 0 uncorrelated |
 | Strategy comparison | native (A): rejected by SiliconFlow · JSON emulation (B): **0/6** · harmony: 14/15 (v7) · harmony + `repo_overview` (C): 13/15 at +58% tokens, so it stays optional |
 
@@ -371,7 +374,7 @@ remaining failure is task quality (`fix-syntax`).
 ## 7. Reproducing
 
 ```bash
-npm test                                   # 119 offline tests
+npm test                                   # 124 offline tests
 npm run test:live                          # needs SILICONFLOW_API_KEY and/or OPENWEBUI_API_KEY (+ OPENWEBUI_BASE_URL, OPENWEBUI_MODEL)
 npm run eval -- --concurrency 1            # full live suite (~30 min on SiliconFlow's entry tier)
 npm run compare -- .eval-runs/<a> .eval-runs/<b>

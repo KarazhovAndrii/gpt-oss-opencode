@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Starts the GPT-OSS <-> OpenCode proxy.
 //   node bin/gpt-oss-proxy.ts [--port N] [--profile NAME] [--config FILE]
-import { loadConfig, apiKeyFor } from "../src/config.ts";
+import { loadConfig, apiKeyFor, envPrefix } from "../src/config.ts";
 import { bindRefusal, createServer } from "../src/server.ts";
 import { pruneLogs } from "../src/log.ts";
 
@@ -29,7 +29,13 @@ server.listen(cfg.port, cfg.host, () => {
   console.log(`gpt-oss-proxy listening on http://${cfg.host}:${cfg.port}/v1`);
   for (const p of Object.values(cfg.profiles)) {
     const mark = p.name === cfg.defaultProfile ? "*" : " ";
-    console.log(` ${mark} ${p.name.padEnd(12)} ${p.baseURL}  model=${p.model}  strategy=${p.strategy}  key=${apiKeyFor(p) ? "present" : `MISSING (${p.apiKeyEnv ?? "apiKeyFile"})`}`);
+    if (!p.baseURL) {
+      console.log(` ${mark} ${p.name.padEnd(12)} not configured (set ${envPrefix(p)}_BASE_URL)`);
+      continue;
+    }
+    // A key is optional: local servers (vLLM, llama.cpp, Ollama) usually need none.
+    const key = apiKeyFor(p) ? "present" : `none (${p.apiKeyEnv ?? "apiKeyFile"} not set)`;
+    console.log(` ${mark} ${p.name.padEnd(12)} ${p.baseURL}  model=${p.model}  strategy=${p.strategy}  key=${key}`);
   }
   const kept = cfg.logRetentionDays ? `${cfg.logRetentionDays} days` : "forever";
   console.log(`logs: ${cfg.logDir} (${cfg.logContent ? "with content" : "metadata only; GPT_OSS_LOG_CONTENT=1 adds content"}, kept ${kept})`);

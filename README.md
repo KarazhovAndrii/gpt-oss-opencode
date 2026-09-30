@@ -1,30 +1,37 @@
 # gpt-oss-opencode
 
-**Use GPT-OSS 20B as a tool-using coding agent in [OpenCode](https://opencode.ai).**
+**A coding agent hosted in [OpenCode](https://opencode.ai), powered by GPT-OSS 20B from any
+provider you choose.**
 
-GPT-OSS 20B is a capable open-weight model, but it makes a poor OpenCode agent on its own.
-SiliconFlow rejects tool calling for it. OpenWebUI drops parts of the conversation on the way
-to Ollama. The model itself sometimes emits malformed calls, invents file paths or repeats
-itself. **gpt-oss-opencode** is a small proxy that runs on your machine between OpenCode and
-the model and fixes that plumbing:
+OpenCode hosts the agent: the conversation, the tools (read, edit, bash, …), permissions
+and session history. GPT-OSS 20B decides what to do next. You can get the model from a
+hosted API, your own GPU server, or a gateway such as OpenWebUI, as long as it meets
+[a short list of requirements](#llm-provider-requirements).
 
-- **OpenCode stays the agent.** It keeps the conversation, runs every tool (read, edit,
-  bash, …) under your permission settings, and compacts long sessions.
-- **The proxy makes the model's tool calls work.** It translates to and from gpt-oss's own
-  tool-call format, checks every call against OpenCode's tool definitions, repairs or re-asks
-  bad ones, stops loops, and retries provider failures.
-- **Two backends:** hosted **SiliconFlow**, or **your own OpenWebUI server** with Ollama
-  serving `gpt-oss:20b`.
-- **Measured:** 14 of 15 live coding scenarios passed in the final evaluation run, and
-  about 95% of tool calls were valid on the first try; the rest were repaired
-  ([validation report](docs/VALIDATION_REPORT.md)).
+Connecting the two directly doesn't work well. Some providers reject tool calling for
+this model, gateways drop parts of the conversation, and the model itself sometimes
+emits malformed calls, invents file paths or repeats itself. **gpt-oss-opencode** is a
+small proxy that runs on your machine between OpenCode and the provider and fixes that
+plumbing:
+
+- **It makes tool calls work with any provider.** It uses the provider's native function
+  calling when available, and otherwise emulates it in gpt-oss's own "harmony" format.
+- **It checks every call** against OpenCode's tool definitions, repairs or re-asks bad
+  ones, stops loops, and retries provider failures.
+- **It is provider-neutral.** A generic `custom` profile covers any OpenAI-compatible
+  endpoint. Two presets cover tested providers with quirks: SiliconFlow (hosted) and
+  OpenWebUI in front of Ollama (self-hosted).
+- **It is measured.** With SiliconFlow as the provider, 14 of 15 live coding scenarios
+  passed in the final evaluation run, and about 95% of tool calls were valid on the first
+  try; the rest were repaired ([validation report](docs/VALIDATION_REPORT.md)).
 - Node.js ≥ 22.18, no runtime dependencies, MIT license.
 
 **Contents:**
 [Quick setup](#quick-setup) ·
 [Example usage](#example-usage) ·
 [How the agent works](#how-the-agent-works) ·
-[Set up your OpenWebUI server](#set-up-your-openwebui-server) ·
+[LLM provider requirements](#llm-provider-requirements) ·
+[Self-hosting with OpenWebUI and Ollama](#self-hosting-with-openwebui-and-ollama) ·
 [Configuration reference](#configuration-reference) ·
 [Security, privacy and logs](#security-privacy-and-logs) ·
 [What to expect](#what-to-expect) ·
@@ -32,79 +39,77 @@ the model and fixes that plumbing:
 
 ## Quick setup
 
-You need **Node.js 22.18 or newer**, **OpenCode 1.18 or newer**, and either a
-**SiliconFlow API key** or an **OpenWebUI server** set up as described in
-[Set up your OpenWebUI server](#set-up-your-openwebui-server).
+You need **Node.js 22.18 or newer**, **OpenCode 1.18 or newer**, and access to
+**GPT-OSS 20B** through an OpenAI-compatible API. Check the
+[provider requirements](#llm-provider-requirements) if you are unsure.
 
-### 1. Start the proxy
+### 1. Start the proxy and point it at your provider
 
 ```bash
 git clone https://github.com/KarazhovAndrii/gpt-oss-opencode.git
 cd gpt-oss-opencode
-npm install                        # dev tooling only; the proxy has no runtime dependencies
+npm install                                   # dev tooling only; the proxy has no runtime dependencies
 
-export SILICONFLOW_API_KEY=sk-...  # PowerShell: $env:SILICONFLOW_API_KEY="sk-..."
+export CUSTOM_BASE_URL=https://your-provider.example/v1   # any OpenAI-compatible endpoint
+export CUSTOM_MODEL=openai/gpt-oss-20b                     # the model id your provider uses
+export CUSTOM_API_KEY=sk-...                               # only if your provider needs a key
 npm start
 ```
 
-It prints where it listens and which backends have a key:
+On Windows PowerShell, set variables like this: `$env:CUSTOM_BASE_URL="https://..."`.
+
+The proxy prints where it listens and which providers are configured:
 
 ```
 gpt-oss-proxy listening on http://127.0.0.1:8787/v1
- * siliconflow  https://api.siliconflow.com/v1  model=openai/gpt-oss-20b  strategy=harmony  key=present
-   openwebui    http://localhost:8080/api  model=gpt-oss20b-opencode  strategy=auto  key=MISSING (OPENWEBUI_API_KEY)
+ * custom       https://your-provider.example/v1  model=openai/gpt-oss-20b  strategy=auto  key=present
+   siliconflow  https://api.siliconflow.com/v1  model=openai/gpt-oss-20b  strategy=harmony  key=none (SILICONFLOW_API_KEY not set)
+   openwebui    http://localhost:8080/api  model=gpt-oss20b-opencode  strategy=auto  key=none (OPENWEBUI_API_KEY not set)
 logs: .../gpt-oss-opencode/logs (metadata only; GPT_OSS_LOG_CONTENT=1 adds content, kept 14 days)
 ```
 
-Leave it running. **Using an OpenWebUI server instead?** Set these three variables before
-`npm start` (the values come from [the server setup](#set-up-your-openwebui-server)):
+Leave it running. **Is your provider one of the tested ones?** Use its preset instead of
+`CUSTOM_*`:
 
-```bash
-export OPENWEBUI_BASE_URL=http://your-server:8080/api   # the address you open OpenWebUI at, plus /api
-export OPENWEBUI_MODEL=gpt-oss20b-opencode               # the model id in OpenWebUI
-export OPENWEBUI_API_KEY=sk-...                          # OpenWebUI: Settings > Account > API keys
-```
+| Provider | Set | OpenCode model |
+|---|---|---|
+| SiliconFlow (hosted) | `SILICONFLOW_API_KEY` | `gpt-oss/siliconflow` |
+| OpenWebUI in front of Ollama (self-hosted) | `OPENWEBUI_BASE_URL`, `OPENWEBUI_MODEL`, `OPENWEBUI_API_KEY` ([server guide](#self-hosting-with-openwebui-and-ollama)) | `gpt-oss/openwebui` |
 
 ### 2. Add the proxy to OpenCode
 
 Copy [`opencode/opencode.json`](opencode/opencode.json) to `~/.config/opencode/opencode.json`
-(on Windows `%USERPROFILE%\.config\opencode\opencode.json`). If you already have that file, merge the
-`provider` block into it; a project's own `opencode.json` works as well.
+(on Windows `%USERPROFILE%\.config\opencode\opencode.json`). If you already have that file,
+merge the `provider` block into it; a project's own `opencode.json` works as well.
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "gpt-oss/siliconflow",
-  "small_model": "gpt-oss/siliconflow",
+  "model": "gpt-oss/custom",
+  "small_model": "gpt-oss/custom",
   "provider": {
     "gpt-oss": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "GPT-OSS 20B (gpt-oss-proxy)",
       "options": { "baseURL": "http://127.0.0.1:8787/v1", "apiKey": "unused-the-proxy-holds-the-provider-keys" },
       "models": {
-        "siliconflow": {
-          "name": "gpt-oss-20b via SiliconFlow",
-          "tool_call": true,
-          "reasoning": true,
-          "limit": { "context": 131072, "output": 8192 },
-          "cost": { "input": 0.04, "output": 0.18 }
-        },
-        "openwebui": {
-          "name": "gpt-oss-20b via OpenWebUI",
-          "tool_call": true,
-          "reasoning": true,
-          "limit": { "context": 32768, "output": 8192 }
-        }
+        "custom":      { "name": "gpt-oss-20b (your provider)", "tool_call": true, "reasoning": true, "limit": { "context": 32768, "output": 8192 } },
+        "siliconflow": { "name": "gpt-oss-20b via SiliconFlow", "tool_call": true, "reasoning": true, "limit": { "context": 131072, "output": 8192 }, "cost": { "input": 0.04, "output": 0.18 } },
+        "openwebui":   { "name": "gpt-oss-20b via OpenWebUI", "tool_call": true, "reasoning": true, "limit": { "context": 32768, "output": 8192 } }
       }
     }
   }
 }
 ```
 
-- `apiKey` is a placeholder: the provider keys stay with the proxy, not OpenCode.
-- `limit` tells OpenCode how large the model's window is. OpenCode then compacts the
-  conversation before it overflows and never asks for more output than the provider allows.
-- For OpenWebUI, `"model"` and `"small_model"` become `gpt-oss/openwebui`.
+- The model key (`custom`, `siliconflow`, `openwebui`) tells the proxy which provider to
+  use. `"model"` sets the default; switch with `/models` in OpenCode or `-m` on the command
+  line.
+- `apiKey` is a placeholder: provider keys stay with the proxy, not OpenCode.
+- `limit.context` is the model's window. Set it to your provider's real context length
+  (and the same number in `CUSTOM_CONTEXT_WINDOW`). OpenCode then compacts long
+  conversations before they overflow. 32768 is a safe default; hosted providers often
+  allow 131072.
 
 ### 3. Run a task
 
@@ -119,8 +124,8 @@ opencode run "Explain what this project does and where its entry point is."
 ### A first task
 
 Here is a real session, with the output trimmed (read ranges, diff context and the model's
-notes removed). It ran through the proxy against SiliconFlow on a small JavaScript project
-with a `src/stats.js` module and one test file:
+notes removed). It ran through the proxy with SiliconFlow, one of the tested providers,
+on a small JavaScript project with a `src/stats.js` module and one test file:
 
 ```text
 $ opencode run "Add a median(values) function to src/stats.js: average of the two middle
@@ -182,7 +187,7 @@ The session took 106 seconds and 18 model calls, and cost $0.006. Along the way:
 
 - The model read the code and the tests before editing, and ran the suite at the end.
 - Three of its edits to the test file failed. It re-read the file and recovered.
-- SiliconFlow returned five server errors (HTTP 500/503). The proxy retried them without
+- The provider returned five server errors (HTTP 500/503). The proxy retried them without
   interrupting the session.
 - It added the `median` test **twice**. The result is correct, but it shows why you should
   review the diff before you commit.
@@ -197,10 +202,10 @@ opencode run -c "The median test is duplicated in test/stats.test.js; remove the
 
 | Goal | Command |
 |---|---|
-| Work interactively | `opencode`, then type tasks; `/models` switches between the SiliconFlow and OpenWebUI entries |
+| Work interactively | `opencode`, then type tasks; `/models` switches between the configured providers |
 | One task from the shell | `opencode run "…"` |
 | Follow up in the last session | `opencode run -c "…"` |
-| Pick the backend for one run | `opencode run -m gpt-oss/openwebui "…"` |
+| Pick the provider for one run | `opencode run -m gpt-oss/siliconflow "…"` (or `gpt-oss/custom`, `gpt-oss/openwebui`) |
 | See what happened in a session | `npm run report -- --latest` (in the proxy folder) |
 
 On Windows, a prompt that contains double quotes can be mangled on the command line; pipe it
@@ -237,24 +242,25 @@ evaluation it did not improve task success and used 58% more tokens, so it is of
 ## How the agent works
 
 ```
-you ──▶ OpenCode ──OpenAI API──▶ gpt-oss-proxy ──▶ SiliconFlow           (tool calls emulated)
-          ▲  runs every tool          │         └─▶ OpenWebUI ─▶ Ollama   (native tool calls)
-          └────── validated tool calls ◀──┘  validate · repair · loop guard · retries · logs
+you ──▶ OpenCode ──OpenAI API──▶ gpt-oss-proxy ──OpenAI API──▶ any GPT-OSS 20B provider
+          ▲  runs every tool          │                         (hosted API, own server,
+          └──── validated tool calls ◀┘                          OpenWebUI, …)
+               validate · repair · loop guard · retries · logs
 ```
 
 | Part | Role |
 |---|---|
-| **OpenCode** | The agent loop: your conversation, the tools (read, glob, grep, edit, write, bash, …), permission prompts, session history and compaction. |
-| **gpt-oss-20b** | Decides the next step: which tool to call with which arguments, or the final answer. |
-| **gpt-oss-proxy** | Sits between the two. It speaks the OpenAI API to OpenCode and the model's native format to the provider, and makes sure every step OpenCode receives is a valid tool call or a real answer. |
+| **OpenCode** | Hosts the agent: your conversation, the tools (read, glob, grep, edit, write, bash, …), permission prompts, session history and compaction. |
+| **GPT-OSS 20B** | Decides the next step: which tool to call with which arguments, or the final answer. Any provider can supply it. |
+| **gpt-oss-proxy** | Sits between the two. It speaks the OpenAI API to OpenCode and to the provider, and makes sure every step OpenCode receives is a valid tool call or a real answer. |
 
 For each step of a task, the proxy:
 
-- **Translates tool calls.** gpt-oss writes tool calls in its own "harmony" format. SiliconFlow
-  refuses function calling for this model, so the proxy describes OpenCode's tools in that
-  format and parses the model's calls out of its reply. On OpenWebUI it uses native tool
-  calls and compensates for OpenWebUI's payload losses. OpenCode always receives standard
-  streamed `tool_calls`.
+- **Gets the tool call out of the model.** With a provider that supports native function
+  calling, the proxy uses it (strategy `native`). Otherwise it describes OpenCode's tools
+  in gpt-oss's own "harmony" format and parses the model's calls out of the reply (strategy
+  `harmony`). The default strategy, `auto`, tries native first and switches to harmony if
+  the provider refuses tools. OpenCode always receives standard streamed `tool_calls`.
 - **Validates every call** against the tool list OpenCode sent: the tool must exist, the JSON
   must parse and match the schema, and paths must be sensible. It repairs what is safe to
   repair: WSL and Git-Bash paths on Windows, relative paths, and paths the model mistyped or
@@ -275,10 +281,53 @@ For each step of a task, the proxy:
 The reasoning behind this design, with the measurements that drove it, is in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Set up your OpenWebUI server
+## LLM provider requirements
 
-Use this chapter to run gpt-oss-20b on your own hardware: **Ollama** serves the model and
-**OpenWebUI** provides accounts, API keys and a model entry for OpenCode.
+Any source of GPT-OSS 20B works if it meets these requirements:
+
+| Requirement | Why |
+|---|---|
+| Serves **GPT-OSS 20B** | The proxy is built around this model's output format and habits. gpt-oss-120b uses the same format but is untested. |
+| **OpenAI-compatible Chat Completions API**: `POST <base URL>/chat/completions`, optionally with `Authorization: Bearer <key>` | This is the only API the proxy calls. |
+| **Tool calls, in one of two ways:** native function calling (`tools` in, `tool_calls` out), **or** the model's raw text with its tool-call markers kept (harmony tokens such as `<\|channel\|>` and `<\|message\|>`) and the `stop` parameter honoured | Native providers use the `native` strategy. The others use `harmony` emulation. `auto` detects which applies. |
+| **A context window of at least 32K tokens**, declared with the same value in OpenCode (`limit.context`) and the proxy (`<PROFILE>_CONTEXT_WINDOW`) | OpenCode's system prompt and tool definitions alone take 5–7K tokens. A server that silently cuts the conversation makes the model forget its task. |
+| **Up to 8K output tokens per response**, or set `maxOutputTokens` to the provider's limit | File writes and edits are generated in a single response. |
+| Streaming is **optional** | The proxy streams to OpenCode either way. Set `"stream": false` for a provider whose stream is broken. |
+
+### Where the model can come from
+
+| Source | Base URL (example) | Model id (example) | Key | Status |
+|---|---|---|---|---|
+| A hosted API that offers GPT-OSS 20B | `https://<provider>/v1` | as the provider names it, often `openai/gpt-oss-20b` | yes | **SiliconFlow tested** (preset `siliconflow`) |
+| OpenWebUI in front of Ollama | `http://<server>:8080/api` | your OpenWebUI model id | yes | **software path tested** (preset `openwebui`, [guide](#self-hosting-with-openwebui-and-ollama)) |
+| Ollama directly | `http://<server>:11434/v1` | `gpt-oss:20b` | no | untested; set Ollama's context length as in [step 1 of the guide](#step-1-serve-gpt-oss20b-with-ollama-and-a-large-enough-context) |
+| Other OpenAI-compatible servers (vLLM, llama.cpp's `llama-server`, LM Studio, …) | `http://<server>:<port>/v1` | as the server names it | usually no | untested |
+
+For any untested source, use the generic `custom` profile (`CUSTOM_BASE_URL`,
+`CUSTOM_MODEL`, and `CUSTOM_API_KEY` if needed) and check it before relying on it.
+
+### Checking a new provider
+
+1. **A full tool round trip:** with the `CUSTOM_*` variables set, run `npm run test:live`.
+   It plays OpenCode's role against your provider, through the proxy, on a small task:
+   read, edit, run the tests, answer.
+2. **The live evaluation** (optional, about 30 minutes):
+   `npm run eval -- --profile custom --concurrency 1` runs the 16 scenarios behind the
+   numbers in the [validation report](docs/VALIDATION_REPORT.md).
+3. **What the proxy saw:** `npm run report -- --latest` shows which strategy was used. A
+   `strategy_fallback` entry means the provider refused native tools and harmony emulation
+   took over.
+
+If the provider refuses tools, set `CUSTOM_STRATEGY=harmony` to skip the detection. If its
+streaming output looks corrupted, set `"stream": false` for its profile in the config file.
+Those are exactly the two quirks the SiliconFlow preset handles.
+
+## Self-hosting with OpenWebUI and Ollama
+
+This chapter is one way to supply the model yourself: **Ollama** serves GPT-OSS 20B on
+your hardware, and **OpenWebUI** provides accounts, API keys and a model entry for
+OpenCode. Plain Ollama or other servers can be used directly through the `custom` profile
+([requirements](#llm-provider-requirements)); step 1 below applies to plain Ollama too.
 
 ```
 OpenCode ─▶ gpt-oss-proxy ─▶ OpenWebUI ─▶ Ollama ─▶ gpt-oss:20b
@@ -384,8 +433,8 @@ another base model later.
 ### Step 4: Create an API key
 
 Sign in as the user the proxy should act as, go to **Settings › Account › API keys**, and
-create a key. It starts with `sk-`. Treat it like a password: the proxy reads
-it from the `OPENWEBUI_API_KEY` environment variable, or from a file (see
+create a key. It starts with `sk-`. Treat it like a password: the proxy reads it from the
+`OPENWEBUI_API_KEY` environment variable, or from a file (see
 [Configuration reference](#configuration-reference)).
 
 ### Step 5: Connect the proxy
@@ -425,10 +474,10 @@ the neutral key to your real OpenWebUI model id.
    route (preferred, see below).
 2. **The proxy has the key:** its startup lines show `openwebui … key=present`.
 3. **A full tool round trip works:** `npm run test:live` sends a real task through the proxy
-   to your server, with the same variables set. The SiliconFlow part is skipped without its
-   key.
+   to your server, with the same variables set. Providers that aren't configured are
+   skipped.
 4. **Optional: the live evaluation** against your server, which takes about 30 minutes:
-   `node eval/run.ts --profile openwebui --concurrency 1`.
+   `npm run eval -- --profile openwebui --concurrency 1`.
 
 ### How the proxy talks to OpenWebUI
 
@@ -456,27 +505,32 @@ supported", the proxy switches to emulated tool calls and remembers that.
 
 ## Configuration reference
 
-### Backends
+### Provider profiles
 
-The proxy chooses the backend from the **model id** OpenCode sends, so both backends can be
-configured at once and you switch in OpenCode:
+Each provider is a profile. OpenCode selects it through the model key (`gpt-oss/<profile>`),
+so several providers can be configured at once and you switch in OpenCode.
 
-| OpenCode model | Proxy profile | Defaults |
+| Profile | For | Defaults |
 |---|---|---|
-| `gpt-oss/siliconflow` | `siliconflow` | `https://api.siliconflow.com/v1`, model `openai/gpt-oss-20b`, key `SILICONFLOW_API_KEY`, strategy `harmony`, window 131072 |
-| `gpt-oss/openwebui` | `openwebui` | `http://localhost:8080/api`, model `gpt-oss20b-opencode`, key `OPENWEBUI_API_KEY`, strategy `auto` (native), window 32768 |
+| `custom` (default) | any OpenAI-compatible provider serving GPT-OSS 20B | no address until `CUSTOM_BASE_URL` is set; model `openai/gpt-oss-20b`; key `CUSTOM_API_KEY` (optional); strategy `auto`; streaming; window 32768 |
+| `siliconflow` (preset) | SiliconFlow | `https://api.siliconflow.com/v1`, model `openai/gpt-oss-20b`, key `SILICONFLOW_API_KEY`; strategy `harmony` and no streaming, because SiliconFlow rejects native tools for this model and corrupts streamed output; window 131072 |
+| `openwebui` (preset) | OpenWebUI in front of Ollama | `http://localhost:8080/api`, model `gpt-oss20b-opencode`, key `OPENWEBUI_API_KEY`; strategy `auto`; route selection and payload fixes for OpenWebUI; window 32768 |
+
+To use **several custom providers**, add named profiles to the config file (see below).
+Each gets its own `<NAME>_*` variables and OpenCode model key `gpt-oss/<name>`.
 
 ### Environment variables
 
 | Variable | Effect |
 |---|---|
-| `SILICONFLOW_API_KEY`, `OPENWEBUI_API_KEY` | provider keys |
-| `<PROFILE>_BASE_URL`, `<PROFILE>_MODEL`, `<PROFILE>_STRATEGY` | override a profile, e.g. `OPENWEBUI_BASE_URL=http://gpu-box:8080/api` |
-| `<PROFILE>_CONTEXT_WINDOW` | the backend's real context length in tokens, e.g. `OPENWEBUI_CONTEXT_WINDOW=65536` |
+| `CUSTOM_BASE_URL`, `CUSTOM_MODEL`, `CUSTOM_API_KEY` | the generic provider: address, model id, key (optional) |
+| `<PROFILE>_BASE_URL`, `<PROFILE>_MODEL`, `<PROFILE>_STRATEGY` | override any profile, e.g. `OPENWEBUI_BASE_URL=http://gpu-box:8080/api`, `CUSTOM_STRATEGY=harmony` |
+| `<PROFILE>_CONTEXT_WINDOW` | the provider's real context length in tokens, e.g. `CUSTOM_CONTEXT_WINDOW=131072` |
+| `SILICONFLOW_API_KEY`, `OPENWEBUI_API_KEY` | keys for the presets |
 | `OPENWEBUI_ROUTE`, `OPENWEBUI_NUM_CTX` | OpenWebUI route (`auto`, `ollama-v1`, `api`) and per-request `num_ctx` (route `api` only) |
 | `GPT_OSS_PORT`, `GPT_OSS_HOST` | listen address (default `127.0.0.1:8787`) |
 | `GPT_OSS_PROXY_TOKEN` | require `Authorization: Bearer <token>` from clients (put the same value in OpenCode's `apiKey`). **Required** for any address other than localhost; see [Security](#security-privacy-and-logs) |
-| `GPT_OSS_PROFILE` | profile used when OpenCode sends an unknown model id |
+| `GPT_OSS_PROFILE` | profile used when OpenCode sends a model id that matches no profile (default `custom`) |
 | `GPT_OSS_STRATEGY` | force a strategy for all profiles: `harmony`, `native`, `json`, `auto` |
 | `GPT_OSS_CONFIG` | config file path (default `./gpt-oss-proxy.config.json` if present) |
 | `GPT_OSS_LOG_DIR` | log directory (default `./logs`) |
@@ -488,15 +542,16 @@ configured at once and you switch in OpenCode:
 
 For anything beyond environment variables, copy
 [`gpt-oss-proxy.config.example.json`](gpt-oss-proxy.config.example.json) to
-`gpt-oss-proxy.config.json` and edit it. Each profile accepts:
+`gpt-oss-proxy.config.json` and edit it. Profiles you add there start from the neutral
+`custom` defaults. Each profile accepts:
 
 | Option | Meaning |
 |---|---|
-| `baseURL`, `model` | where the backend is and which model to request |
+| `baseURL`, `model` | where the provider is and which model to request |
 | `apiKeyEnv` or `apiKeyFile` | where the key comes from: an environment variable, or a one-line file such as `"apiKeyFile": "key.txt"` |
 | `strategy`, `fallbackStrategy` | tool-call strategy (see below) |
-| `contextWindow`, `maxOutputTokens` | the backend's limits |
-| `stream` | stream from the backend (off for SiliconFlow) |
+| `contextWindow`, `maxOutputTokens` | the provider's limits |
+| `stream` | stream from the provider (turn off if its stream is broken) |
 | `extraBody` | merged into every request, e.g. `{"reasoning_effort": "low"}` |
 | `headers`, `pricing`, `toolDescriptions`, `aliases` | extra headers, USD per 1M tokens for cost reporting, `compact` or `full` tool descriptions, extra model ids |
 
@@ -504,13 +559,12 @@ Timeouts, retry and repair budgets and loop thresholds are under `limits` in the
 
 ### Tool-call strategies
 
-- **`harmony`**, the SiliconFlow default: SiliconFlow rejects `tools` for gpt-oss-20b
-  (`400 "Function call is not supported for this model"`), so the proxy describes the tools
-  in gpt-oss's own format and parses its calls. SiliconFlow's streaming corrupts that format,
-  so the proxy calls it without streaming and still streams to OpenCode.
-- **`native`**: the backend's own tool calling, validated and repaired by the proxy.
-- **`auto`**, the OpenWebUI default: native first, falling back to `harmony` if the backend
-  says tools are not supported.
+- **`auto`**, the default: the provider's native tool calling first, switching to
+  `harmony` if the provider says tools are not supported (remembered).
+- **`native`**: the provider's own tool calling, validated and repaired by the proxy.
+- **`harmony`**: for providers without usable function calling. The proxy describes the
+  tools in gpt-oss's own format, stops generation at the end of a call, and parses the
+  call from the raw output. The SiliconFlow preset uses it.
 - **`json`**: an experimental JSON-envelope emulation, kept for comparison. It performed
   poorly with this model.
 
@@ -526,6 +580,8 @@ Timeouts, retry and repair budgets and loop thresholds are under `limits` in the
   errors, tokens and cost. Your prompts, the model's output and file contents are left out;
   tool-call values appear as `[N chars]`. Set `GPT_OSS_LOG_CONTENT=1` while debugging to log
   everything. Logs older than 14 days are deleted automatically.
+- **Your provider sees your code.** Everything the agent reads is sent to the model
+  provider. Choose the provider accordingly, or self-host.
 - **Tools run with your permissions.** OpenCode executes what the model asks for, including
   shell commands. In repositories you don't trust, keep OpenCode's permission prompts for
   `bash` and `edit`: text inside a repository can try to steer any LLM agent (prompt
@@ -538,8 +594,10 @@ and context truncation. Other forms: `--session ses_abc`, a log directory, or `-
 
 ## What to expect
 
-The proxy makes gpt-oss-20b's tool use reliable; it cannot make the model smarter. The
-measured numbers are in the [validation report](docs/VALIDATION_REPORT.md).
+The proxy makes GPT-OSS 20B's tool use reliable; it cannot make the model smarter. The
+numbers below were measured with SiliconFlow as the provider. The model is the same
+everywhere, so task quality should carry over, while speed depends on your provider. Full
+results are in the [validation report](docs/VALIDATION_REPORT.md).
 
 - **Good at:** finding and explaining code, small features with tests, targeted edits and
   fixes, and searching large files. These pass consistently in the live evaluation.
@@ -549,30 +607,32 @@ measured numbers are in the [validation report](docs/VALIDATION_REPORT.md).
     a header spec, find a hidden lexer bug, add tests), it met 10–11 of 12 checks in every
     run but never all 12. It always fixed the lexer bug but kept missing a requirement the
     header states explicitly.
-- **Speed:** on SiliconFlow's entry tier (about 40K tokens per minute), simple tasks take
-  1–3 minutes and larger ones 5–20. On your own server, speed depends on your GPU.
-- **One tool call per step** with emulated tool calls (no parallel calls).
-- **Tested on** Windows 11 and Linux (Ubuntu under WSL2); macOS is untested.
-- **gpt-oss-20b behind OpenWebUI is not verified yet.** The OpenWebUI 0.11.4 + Ollama 0.34.4
-  software path was verified live with a small stand-in model, because gpt-oss-20b doesn't
-  fit the test machine. Run [step 6](#step-6-verify) against your server before relying on it.
+- **Speed depends on the provider.** On SiliconFlow's entry tier (about 40K tokens per
+  minute), simple tasks took 1–3 minutes and larger ones 5–20. On your own server it
+  depends on the GPU.
+- **One tool call per step** with the `harmony` strategy (no parallel calls).
+- **Tested providers:** SiliconFlow, and OpenWebUI + Ollama with a small stand-in model.
+  GPT-OSS 20B behind OpenWebUI, and all other providers, are not verified yet: check them
+  as described in [Checking a new provider](#checking-a-new-provider).
+- **Tested platforms:** Windows 11 and Linux (Ubuntu under WSL2); macOS is untested.
 
 ## Development
 
 ```bash
-npm test                 # 119 unit and contract tests; offline, uses the same AI SDK package as OpenCode
+npm test                 # 124 unit and contract tests; offline, uses the same AI SDK package as OpenCode
 npm run typecheck        # tsc --noEmit (TypeScript runs natively on Node; no build step)
-npm run eval -- --concurrency 1                     # live: real OpenCode + proxy + SiliconFlow, 16 scenarios
-npm run eval -- --only feature-median --repeat 3    # selected scenarios, repeated
+npm run test:live        # a real tool round trip for each configured provider (small cost)
+npm run eval -- --profile custom --concurrency 1    # live evaluation: real OpenCode + proxy + your provider, 16 scenarios
+npm run eval -- --only feature-median --repeat 3    # selected scenarios, repeated (default profile: siliconflow)
 npm run recheck -- .eval-runs/<run>                 # re-judge a saved run with the current checks
-npm run test:live        # a real tool round trip per configured backend (small cost)
 ```
 
 The live evaluation runs real OpenCode on copies of the synthetic repositories in
 `eval/fixtures/` and judges each scenario with deterministic checks: hidden tests, repository
-state and the executed tool calls. Results are written to `.eval-runs/<run>/`. It needs
-`SILICONFLOW_API_KEY` and the OpenCode CLI (set `OPENCODE_BIN` to use a specific binary). The
-`cpp-evaluator` scenario also needs a C++ compiler (g++, clang++ or MSVC).
+state and the executed tool calls. Results are written to `.eval-runs/<run>/`. It needs the
+OpenCode CLI (set `OPENCODE_BIN` to use a specific binary) and a configured provider
+(`--profile` picks it; the default, `siliconflow`, is the reference used in the validation
+report). The `cpp-evaluator` scenario also needs a C++ compiler (g++, clang++ or MSVC).
 
 For OpenWebUI work without a GPU server, `node scripts/owui-local-stack.mjs up` builds a real
 local OpenWebUI + Ollama stack in `.local-stack/`, with a small stand-in model.
@@ -581,7 +641,7 @@ servers.
 
 **More documentation:**
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): design and module map.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): design, provider profiles and module map.
 - [docs/VALIDATION_REPORT.md](docs/VALIDATION_REPORT.md): provider investigation, every
   failure found and how it was fixed, and all evaluation results.
 

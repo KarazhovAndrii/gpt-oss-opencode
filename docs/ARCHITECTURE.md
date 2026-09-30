@@ -35,7 +35,7 @@ does" / "explains a file it never read" failure (0/5 correct in those probes).
 ## Design
 
 ```
-OpenCode ──(OpenAI chat API, SSE)──▶ gpt-oss-proxy ──(OpenAI chat API)──▶ SiliconFlow / OpenWebUI
+OpenCode ──(OpenAI chat API, SSE)──▶ gpt-oss-proxy ──(OpenAI chat API)──▶ any GPT-OSS 20B provider
    ▲  executes tools                  │ strategy adapter (harmony | native | json)
    └──────── tool_calls ◀─────────────┤ validation + repair · loop guard · context guard
                                       │ timeouts/retries/backoff · JSONL diagnostics
@@ -53,6 +53,18 @@ uses, works with any OpenCode UI (TUI, `run`, server), and switching providers
 is configuration only. An optional plugin (`opencode/plugin/gpt-oss-proxy.ts`)
 can host the proxy inside OpenCode's process for convenience.
 
+### Provider profiles
+
+The model can come from any provider with an OpenAI-compatible Chat Completions API
+that serves GPT-OSS 20B (requirements: README). Each provider is a profile, selected by
+the model id OpenCode sends. The default profile `custom` is vendor-neutral: `auto`
+strategy, streaming, a 32K window, set through `CUSTOM_BASE_URL`, `CUSTOM_MODEL` and
+`CUSTOM_API_KEY`. Profiles added in a config file inherit these neutral defaults. The
+presets `siliconflow` and `openwebui` exist only because those tested providers have
+quirks: SiliconFlow rejects native tools and corrupts streams, and OpenWebUI drops fields
+and needs route selection. Everything below the profile (orchestration, validation,
+guards) is provider-independent.
+
 ### Strategies (per provider profile)
 
 | Strategy | Used when | How |
@@ -60,7 +72,7 @@ can host the proxy inside OpenCode's process for convenience.
 | `harmony` (default for SiliconFlow) | provider rejects/garbles native tools | Tools rendered as the harmony `namespace functions { … }` TypeScript block gpt-oss was trained on; `stop: ["<|call|>"]`; raw harmony output parsed deterministically (channels, recipients, terminators); history sent with native `tool_calls`/`tool` roles. |
 | `native` | provider supports tools (OpenWebUI → Ollama) | OpenCode's tools forwarded as-is; returned calls validated/repaired; leaked raw harmony recovered. For OpenWebUI profiles `src/openwebui.ts` also picks the route and fixes the payload (below). |
 | `json` (comparison baseline) | – | Classic prompt-level JSON-envelope emulation. |
-| `auto` (default for OpenWebUI) | unknown provider | `native`; on a "tools not supported" 400 falls back to `fallbackStrategy` and remembers it. |
+| `auto` (default for `custom` and OpenWebUI) | any provider | `native`; on a "tools not supported" 400 falls back to `fallbackStrategy` and remembers it. |
 
 The orchestration (`src/agent.ts`) is identical for all strategies, so
 switching providers never touches it.

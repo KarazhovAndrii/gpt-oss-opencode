@@ -4,7 +4,7 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import type { Config } from "./config.ts";
-import { selectProfile, apiKeyFor } from "./config.ts";
+import { selectProfile, apiKeyFor, envPrefix } from "./config.ts";
 import { Logger, truncate } from "./log.ts";
 import { ChatEmitter } from "./emitter.ts";
 import { runChat, type ChatRequest } from "./agent.ts";
@@ -111,6 +111,17 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse, c
   const stream = !!body.stream;
   const includeUsage = !stream || !!(body.stream_options as any)?.include_usage;
   const emitter = new ChatEmitter(res, { stream, includeUsage, model: body.model ?? profile.name, id: `chatcmpl-${reqId}` });
+
+  if (!profile.baseURL) {
+    const px = envPrefix(profile);
+    const configured = Object.values(cfg.profiles).filter((p) => p.baseURL).map((p) => p.name);
+    logger.event(session, "guard_stop", { req: reqId, kind: "not_configured", reason: `profile ${profile.name} has no baseURL` });
+    emitter.content(
+      `[gpt-oss-proxy] Model "${body.model ?? ""}" uses the provider profile "${profile.name}", which has no address yet. Set ${px}_BASE_URL (plus ${px}_MODEL and ${px}_API_KEY if your provider needs them) and restart the proxy${configured.length ? `, or use one of the configured profiles: ${configured.join(", ")}` : ""}.`,
+    );
+    emitter.finish("stop");
+    return;
+  }
 
   const ctrl = new AbortController();
   res.on("close", () => {
