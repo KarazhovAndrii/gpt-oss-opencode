@@ -27,6 +27,7 @@ SiliconFlow was the provider used for the live measurements.
 | **Release validation (final code)**, 16 scenarios incl. `cpp-evaluator` | **14/16**; the original 15: **14/15**; 87/91 checks; 95.4% first-attempt valid calls; 0 proxy stops; 0 uncorrelated results (section 4.5) |
 | Release validation, three earlier full runs (before the last four fixes) | 14/15, 14/15, 13/15 on the original 15; 0 proxy stops in all |
 | Linux (Ubuntu/WSL2), 8-scenario smoke run | **8/8**, 42/42 checks, 100% first-attempt valid calls |
+| gpt-oss-120b on SiliconFlow (section 4.6) | provider behaviour identical to 20b (native tools rejected); live tool round trip through the proxy **passes** (20 s); full evaluation not run |
 | Live OpenCode evaluation, 15 scenarios, v7 | **14/15 passed (93%)**, 76/79 checks |
 | First-attempt valid tool calls (v7) | 96.8% (92/95); all invalid calls repaired by re-prompting |
 | Proxy stops / uncorrelated tool results (v7) | 0 / 0 |
@@ -315,6 +316,25 @@ Linux smoke run (Ubuntu under WSL2, same proxy code as release-1–3, 8 scenario
 discovery, features, edits, large files, paths, JSON escaping and missing files): **8/8,
 42/42 checks, 100% first-attempt valid calls (37/37)**, $0.012.
 
+### 4.6 gpt-oss-120b (2026-09-30)
+
+SiliconFlow also serves `openai/gpt-oss-120b`. Two checks were repeated for it: the provider
+probe (`node scripts/probe-provider.mjs https://api.siliconflow.com/v1 openai/gpt-oss-120b`),
+and the live lifecycle test (`SILICONFLOW_MODEL=openai/gpt-oss-120b npm run test:live`).
+
+| Check | gpt-oss-120b | Same as 20b? |
+|---|---|---|
+| `tools`: stream, non-stream, `tool_choice: "required"`, tool-history continuation | HTTP 400 `code 20037 "Function call is not supported for this model"` | yes |
+| `response_format: json_schema` | HTTP 200 with malformed content: arguments nested inside the tool-name string | yes (unusable either way) |
+| `response_format: json_object`, streamed | the harmony channel leaked as JSON: `[{"analysis": "…"}]` | yes |
+| plain chat with `reasoning_effort: low` | works; `reasoning_content` returned separately (47 reasoning tokens) | yes |
+| **Live lifecycle through the proxy** (harmony strategy, OpenCode's real tool catalog) | **pass** in 20.2 s: glob → read test → read source → edit → `npm test` → read `package.json` → correct final answer | — |
+
+**Conclusion:** the provider and the format behave exactly as they do for 20b, so the proxy
+applies unchanged. The 16-scenario evaluation has not been run with 120b. Whether its
+stronger reasoning reduces the model-level failures (sections 4.5, 5 and 6.1) is still
+open. The SiliconFlow preset's `pricing` is for 20b.
+
 ## 5. Log review (v7, every session, via `bin/report.ts`)
 
 | Finding | Count | Assessment |
@@ -370,6 +390,10 @@ remaining failure is task quality (`fix-syntax`).
    | 1 | 20-min limit; `--label` repeated a path segment | 7/13 | edit churn in its own test file (`calc::eval` → `calc::calc::evaluate`), then mistyped paths denied; out of time with 809 s of rate-limit backoff |
    | 2 | no time limit | 7/12 | provider outage (~60 s of 500/503) exhausted the 3 transport retries mid-task |
    | 3 | + `reanchorPath`, 8 transport retries | **11/12** | fixed the latent lexer bug and passed the precedence, function and error groups plus its own 27 assertions; it evaluates while parsing, so `1 / 0 +` raises EvalError instead of ParseError |
+10. **gpt-oss-120b** has had only the provider probe and one live lifecycle run
+    (section 4.6). Its task-level results are unmeasured. To measure them, run
+    `SILICONFLOW_MODEL=openai/gpt-oss-120b npm run eval -- --concurrency 1`, or use
+    `--profile custom` with another provider.
 
 ## 7. Reproducing
 

@@ -7,7 +7,7 @@
   "logRetentionDays": 14,
   "profiles": {
     "custom": {
-      "//": "Any OpenAI-compatible provider serving GPT-OSS 20B. Add more profiles like this one under any name; the OpenCode model id gpt-oss/<name> selects them.",
+      "//": "Any OpenAI-compatible provider serving GPT-OSS (e.g. openai/gpt-oss-20b or openai/gpt-oss-120b). Add more profiles like this one under any name; the OpenCode model id gpt-oss/<name> selects them.",
       "baseURL": "http://gpu-box:8000/v1",
       "model": "openai/gpt-oss-20b",
       "apiKeyEnv": "CUSTOM_API_KEY",

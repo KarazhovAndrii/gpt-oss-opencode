@@ -1,7 +1,7 @@
 {
   "name": "gpt-oss-opencode",
   "version": "0.1.0",
-  "description": "Makes GPT-OSS 20B a reliable tool-calling coding agent inside OpenCode (harmony-aware OpenAI-compatible proxy).",
+  "description": "Makes GPT-OSS (gpt-oss-20b, gpt-oss-120b) a reliable tool-calling coding agent inside OpenCode, with the model from any provider (harmony-aware OpenAI-compatible proxy).",
   "type": "module",
   "private": true,
   "license": "MIT",

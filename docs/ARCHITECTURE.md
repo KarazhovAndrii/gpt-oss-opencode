@@ -2,7 +2,9 @@
 
 ## The problem, as measured
 
-GPT-OSS 20B has to act as OpenCode's agent model. OpenCode talks to models through
+GPT-OSS has to act as OpenCode's agent model. The measurements below were made with
+gpt-oss-20b. gpt-oss-120b shares its format, and SiliconFlow treats it the same way (see
+VALIDATION_REPORT §4.6), so the design applies to both sizes. OpenCode talks to models through
 the Vercel AI SDK's OpenAI-compatible provider: every request carries the full
 conversation plus the tool catalog (`bash, edit, glob, grep, read, skill, task,
 todowrite, webfetch, write`, plus plugin/MCP tools), always with `stream: true`,
@@ -35,7 +37,7 @@ does" / "explains a file it never read" failure (0/5 correct in those probes).
 ## Design
 
 ```
-OpenCode ──(OpenAI chat API, SSE)──▶ gpt-oss-proxy ──(OpenAI chat API)──▶ any GPT-OSS 20B provider
+OpenCode ──(OpenAI chat API, SSE)──▶ gpt-oss-proxy ──(OpenAI chat API)──▶ any GPT-OSS provider
    ▲  executes tools                  │ strategy adapter (harmony | native | json)
    └──────── tool_calls ◀─────────────┤ validation + repair · loop guard · context guard
                                       │ timeouts/retries/backoff · JSONL diagnostics
@@ -56,7 +58,7 @@ can host the proxy inside OpenCode's process for convenience.
 ### Provider profiles
 
 The model can come from any provider with an OpenAI-compatible Chat Completions API
-that serves GPT-OSS 20B (requirements: README). Each provider is a profile, selected by
+that serves GPT-OSS, 20b or 120b (requirements: README). Each provider is a profile, selected by
 the model id OpenCode sends. The default profile `custom` is vendor-neutral: `auto`
 strategy, streaming, a 32K window, set through `CUSTOM_BASE_URL`, `CUSTOM_MODEL` and
 `CUSTOM_API_KEY`. Profiles added in a config file inherit these neutral defaults. The

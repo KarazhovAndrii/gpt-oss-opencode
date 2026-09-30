@@ -5,27 +5,27 @@
   "provider": {
     "gpt-oss": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "GPT-OSS 20B (gpt-oss-proxy)",
+      "name": "GPT-OSS (gpt-oss-proxy)",
       "options": {
         "baseURL": "http://127.0.0.1:8787/v1",
         "apiKey": "unused-the-proxy-holds-the-provider-keys"
       },
       "models": {
         "custom": {
-          "name": "gpt-oss-20b (your provider)",
+          "name": "GPT-OSS (your provider)",
           "tool_call": true,
           "reasoning": true,
           "limit": { "context": 32768, "output": 8192 }
         },
         "siliconflow": {
-          "name": "gpt-oss-20b via SiliconFlow",
+          "name": "GPT-OSS via SiliconFlow",
           "tool_call": true,
           "reasoning": true,
           "limit": { "context": 131072, "output": 8192 },
           "cost": { "input": 0.04, "output": 0.18 }
         },
         "openwebui": {
-          "name": "gpt-oss-20b via OpenWebUI",
+          "name": "GPT-OSS via OpenWebUI",
           "tool_call": true,
           "reasoning": true,
           "limit": { "context": 32768, "output": 8192 }

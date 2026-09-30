@@ -11,7 +11,7 @@
 //   <PROFILE>_BASE_URL / <PROFILE>_MODEL   e.g. CUSTOM_BASE_URL, OPENWEBUI_MODEL
 //   <PROFILE>_CONTEXT_WINDOW  the model server's real context length (tokens)
 //
-// Profiles: "custom" (the default) is any OpenAI-compatible provider serving GPT-OSS 20B,
+// Profiles: "custom" (the default) is any OpenAI-compatible provider serving GPT-OSS (20b or 120b),
 // configured with CUSTOM_BASE_URL, CUSTOM_MODEL and CUSTOM_API_KEY (optional for local
 // servers). "siliconflow" and "openwebui" are presets for tested providers with quirks.
 
@@ -116,7 +116,7 @@ export const DEFAULT_LIMITS: Limits = {
 };
 
 export const DEFAULT_PROFILES: Record<string, Profile> = {
-  // Any OpenAI-compatible endpoint that serves GPT-OSS 20B (requirements: README). Also the
+  // Any OpenAI-compatible endpoint that serves GPT-OSS, 20b or 120b (requirements: README). Also the
   // base for profiles added in a config file, so none of them inherits a vendor's quirks.
   custom: {
     name: "custom",

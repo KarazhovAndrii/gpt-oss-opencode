@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## What this is
 
-`gpt-oss-opencode`: an OpenAI-compatible proxy that lets GPT-OSS 20B act as OpenCode's
+`gpt-oss-opencode`: an OpenAI-compatible proxy that lets GPT-OSS (gpt-oss-20b, fully evaluated; gpt-oss-120b, tool round trip verified) act as OpenCode's
 tool-calling agent model, with the model supplied by any OpenAI-compatible provider that serves
 it (generic `custom` profile; tested presets: SiliconFlow via harmony emulation, OpenWebUI via native tools
 with fallback). OpenCode stays the tool executor; the proxy never touches repositories.
