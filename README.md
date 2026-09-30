@@ -10,13 +10,16 @@ hosted API, your own GPU server, or a gateway such as OpenWebUI, as long as it m
 
 ## Why it's useful
 
-**OpenCode and GPT-OSS don't work together out of the box. This proxy is what makes them work.**
+**Connecting OpenCode to GPT-OSS often fails in practice, in ways that depend on the
+provider and inference engine. This proxy fixes the failures we measured.**
 
 OpenCode runs its agent entirely through tool calls. Every step (reading a file, editing
 it, running the tests) must arrive from the model as a well-formed OpenAI `tool_calls`
 message that matches OpenCode's tool schemas. GPT-OSS was trained on its own tool-call
-format ("harmony"), and the providers and gateways in between break that exchange in
-several ways. We measured each failure. Here is what goes wrong without the proxy and
+format ("harmony"), and whether the two meet correctly depends on the provider or
+inference engine in between. Some setups work; many users report ones that don't (see
+[known public reports](#known-public-reports)). We measured the failures below on
+SiliconFlow and on OpenWebUI with Ollama. Here is what goes wrong without the proxy and
 what it does instead:
 
 | Without gpt-oss-opencode | With it |
@@ -28,10 +31,30 @@ what it does instead:
 | **OpenCode uses the wrong system prompt.** For a model id containing "gpt", OpenCode's prompt demands an `apply_patch` tool that it doesn't offer to "oss" models. | The shipped config uses neutral model ids, and the proxy maps them to the real model. |
 | **The model's own mistakes derail sessions.** Malformed calls (`globjson`, arguments inside the tool name, a bare `to=functions.read?` returned as the "answer"). Long file paths retyped with wrong digits: OpenCode denies them as outside the project, and the model starts reasoning about permissions. A timed-out polling loop re-run with a 10-minute timeout. Tool results the model invented instead of waiting for. | Every call is checked against OpenCode's tool schemas before OpenCode sees it. Broken calls are repaired or sent back with the exact error, mistyped paths are corrected when unambiguous, loops are cut off, and invented results are discarded. About 95% of calls are valid on the first try and the rest are repaired; in the final runs, no turn had to be stopped. |
 
-**The result:** GPT-OSS works as an OpenCode agent on providers where it otherwise can't run
-at all, and the silent failures of self-hosted gateways are handled for you. You keep
-OpenCode exactly as it is. All 33 failure modes found and fixed are documented, with
-evidence, in the [validation report](docs/VALIDATION_REPORT.md).
+**The result:** on the setups we tested, GPT-OSS works as an OpenCode agent where it
+otherwise couldn't run at all, and the silent failures of the self-hosted gateway are
+handled for you. You keep OpenCode exactly as it is. All 33 failure modes found and fixed
+are documented, with evidence, in the [validation report](docs/VALIDATION_REPORT.md).
+
+### Known public reports
+
+Other users hit the same classes of problems on other setups. The table says, honestly,
+whether this project fixes each one or only targets the same kind of failure. Statuses
+are as of September 2026; newer versions of these projects may have fixed some.
+
+| Report | What fails | Status here |
+|---|---|---|
+| [OpenCode #7524](https://github.com/anomalyco/opencode/issues/7524) (Jan 2026) | gpt-oss-120b on Scaleway: the chat-completions endpoint doesn't support tool calls for the model, and the conversation breaks after the first call | Same problem as SiliconFlow, where the proxy's emulation fixes it. **Not tested on Scaleway.** |
+| [vLLM #22578](https://github.com/vllm-project/vllm/issues/22578) (Aug 2025, closed "not planned") | Tool calls through vLLM's chat-completions endpoint fail with gpt-oss-120b: parser errors, empty arguments | The `harmony` strategy parses calls itself instead of relying on the server's parser, but needs the server to return the model's raw output. **Not tested with vLLM.** |
+| [OpenCode #7185](https://github.com/anomalyco/opencode/issues/7185) (Jan 2026) | gpt-oss-120b on vLLM only "thinks" and never calls a tool | Likely the same parser problem. The proxy recovers calls the model writes out as text, and `harmony` bypasses the parser. **Not tested with vLLM.** |
+| [OpenCode #27210](https://github.com/anomalyco/opencode/issues/27210) (May 2026, closed "not planned") | A gpt-oss-120b subagent stops mid-reasoning after a few tool calls and returns an empty result | The proxy re-prompts once when a reply has neither text nor a tool call. **Not tested with this setup.** |
+| [Ollama #12187](https://github.com/ollama/ollama/issues/12187) (Sep 2025, open) | Behind OpenWebUI, the model starts a tool call and then "completes" without doing anything | Matches the silent Ollama error that OpenWebUI turns into an empty answer; the proxy detects that and retries (tested with recorded traffic). **Not tested for this exact report.** |
+| [Ollama #11800](https://github.com/ollama/ollama/issues/11800) (Aug 2025, closed) | HTTP 500 "unexpected error format in response" when the model's tool-call JSON is invalid | **Partly.** The proxy retries server errors, but re-asks the model to fix its call only for Ollama's "error parsing tool call" message. |
+| Blog posts ([nijho.lt](https://www.nijho.lt/post/ollama-opencode/), [aldrickb.com](https://aldrickb.com/ollama-gpt-tools-error/)) | Ollama's 4K default context silently breaks tool calling with gpt-oss:20b | **Verified.** The proxy detects the truncation and warns in OpenCode; the fix is a server setting ([step 1 of the guide](#step-1-serve-gpt-oss20b-with-ollama-and-a-large-enough-context)). |
+| [OpenCode #1633](https://github.com/sst/opencode/issues/1633) (Aug 2025, closed) | At launch, OpenCode displayed GPT-OSS's harmony output incorrectly | Fixed in OpenCode itself. Listed to show that some early problems are solved. |
+
+If your setup is one of the untested ones, [check your provider](#checking-a-new-provider)
+before relying on the proxy, and please report what you find.
 
 **Who it's for:** anyone who wants gpt-oss-20b or gpt-oss-120b as their OpenCode agent,
 especially:
