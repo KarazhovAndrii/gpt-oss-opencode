@@ -39,7 +39,7 @@ You need **Node.js 22.18 or newer**, **OpenCode 1.18 or newer**, and either a
 ### 1. Start the proxy
 
 ```bash
-git clone <this repository> gpt-oss-opencode
+git clone https://github.com/KarazhovAndrii/gpt-oss-opencode.git
 cd gpt-oss-opencode
 npm install                        # dev tooling only; the proxy has no runtime dependencies
 

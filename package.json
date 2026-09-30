@@ -5,6 +5,12 @@
   "type": "module",
   "private": true,
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KarazhovAndrii/gpt-oss-opencode.git"
+  },
+  "homepage": "https://github.com/KarazhovAndrii/gpt-oss-opencode#readme",
+  "bugs": "https://github.com/KarazhovAndrii/gpt-oss-opencode/issues",
   "engines": {
     "node": ">=22.18"
   },
