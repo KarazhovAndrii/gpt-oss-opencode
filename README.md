@@ -8,11 +8,45 @@ and session history. GPT-OSS decides what to do next. You can get the model from
 hosted API, your own GPU server, or a gateway such as OpenWebUI, as long as it meets
 [a short list of requirements](#llm-provider-requirements).
 
-Connecting the two directly doesn't work well, and the problems are the same for both
-model sizes. Some providers reject tool calling for these models, gateways drop parts of
-the conversation, and the model itself sometimes emits malformed calls, invents file
-paths or repeats itself. **gpt-oss-opencode** is a small proxy that runs on your machine
-between OpenCode and the provider and fixes that plumbing:
+## Why it's useful
+
+- **A coding agent on open-weight models, with no lock-in.** GPT-OSS models are
+  Apache-2.0 open weights. You choose who runs them (a hosted API, your company's GPU
+  server, or your own machine) and switch providers by changing configuration, not code.
+- **Your code can stay in-house.** Self-host the model, for example behind OpenWebUI, and
+  the code the agent reads is sent only to your own model server. gpt-oss-20b runs on a single
+  16 GB GPU, which fits many teams with privacy or compliance requirements.
+- **It costs very little to run.** On a hosted API, a small feature with tests cost about
+  **half a cent** in a [real session](#a-first-task), and the full 16-scenario evaluation
+  about **$0.05–0.07** per run with gpt-oss-20b.
+- **It works where the direct setup doesn't.** Without the proxy, some providers refuse
+  tool calls for GPT-OSS outright, so OpenCode can't use the model as an agent at all.
+  With it, gpt-oss-20b passed **14 of 15** live coding scenarios, and about 95% of its
+  tool calls were valid on the first try; the rest were repaired automatically.
+- **Nothing new to learn.** You keep OpenCode's terminal UI, sessions, permission
+  prompts and tools. The proxy is invisible once it runs, or OpenCode can start it for you.
+- **You can check every claim.** The results come from a live evaluation harness in
+  this repository, which you can re-run against your own provider before you rely on it
+  ([validation report](docs/VALIDATION_REPORT.md)).
+
+**Who it's for:**
+
+- developers who want a capable coding agent without depending on a closed model vendor;
+- teams that must keep source code on their own infrastructure;
+- organisations that already run OpenWebUI or Ollama and want to reuse them for coding;
+- students, hobbyists and anyone on a budget;
+- people who build or research agents and want a measured, reproducible setup.
+
+It is honest about limits: the agent handles everyday coding tasks well, but larger or
+subtler work needs your review (see [What to expect](#what-to-expect)).
+
+## What it fixes
+
+Connecting OpenCode directly to GPT-OSS doesn't work well, and the problems are the same
+for gpt-oss-20b and gpt-oss-120b. Some providers reject tool calling for these models,
+gateways drop parts of the conversation, and the model itself sometimes emits malformed
+calls, invents file paths or repeats itself. **gpt-oss-opencode** is a small proxy that
+runs on your machine between OpenCode and the provider and fixes that plumbing:
 
 - **It makes tool calls work with any provider.** It uses the provider's native function
   calling when available, and otherwise emulates it in gpt-oss's own "harmony" format.
@@ -21,14 +55,13 @@ between OpenCode and the provider and fixes that plumbing:
 - **It is provider-neutral.** A generic `custom` profile covers any OpenAI-compatible
   endpoint. Two presets cover tested providers with quirks: SiliconFlow (hosted) and
   OpenWebUI in front of Ollama (self-hosted).
-- **It is measured.** With gpt-oss-20b on SiliconFlow, 14 of 15 live coding scenarios
-  passed in the final evaluation run, and about 95% of tool calls were valid on the first
-  try; the rest were repaired ([validation report](docs/VALIDATION_REPORT.md)).
-  gpt-oss-120b passed the end-to-end tool check through the same proxy
-  ([model sizes](#model-sizes-20b-and-120b)).
+- **It covers both model sizes.** gpt-oss-20b is fully evaluated. gpt-oss-120b passed the
+  end-to-end tool check through the same proxy ([model sizes](#model-sizes-20b-and-120b)).
 - Node.js ≥ 22.18, no runtime dependencies, MIT license.
 
 **Contents:**
+[Why it's useful](#why-its-useful) ·
+[What it fixes](#what-it-fixes) ·
 [Quick setup](#quick-setup) ·
 [Example usage](#example-usage) ·
 [How the agent works](#how-the-agent-works) ·
