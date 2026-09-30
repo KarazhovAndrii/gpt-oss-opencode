@@ -29,7 +29,7 @@ upstream, compact tool descriptions, provider-default reasoning effort, v7 opera
 | Proxy stops / uncorrelated tool results (v7) | 0 / 0 |
 | Cost / tokens (v7, all 15 scenarios) | $0.038 · 736K input + 46K output tokens · 129 model calls |
 | Live lifecycle test on SiliconFlow (`npm run test:live`) | **pass**: glob → read test → read source → edit → `npm test` → correct answer (17.6 s) |
-| Offline tests (`npm test`) | **118/118** unit + contract tests (incl. real OpenWebUI captures, AI SDK client) |
+| Offline tests (`npm test`) | **119/119** unit + contract tests (incl. real OpenWebUI captures, AI SDK client) |
 | OpenWebUI 0.11.4 + Ollama 0.34.4 (real, local stand-in model) | lifecycle passes on both routes; OpenCode e2e 100% valid calls (15/15), 0 uncorrelated |
 | Strategy comparison | native (A): rejected by SiliconFlow · JSON emulation (B): **0/6** · harmony: 14/15 (v7) · harmony + `repo_overview` (C): 13/15 at +58% tokens, so it stays optional |
 
@@ -109,6 +109,7 @@ Each was reproduced, fixed, and covered by a regression test (unit/contract) or 
 | 30 | release run 3 | an ellipsis inside a segment (`…\improved_tools_agent\.eval-r...\src\stats.js`) was denied as an outside directory; the model then spent steps reasoning about permissions | `expandElidedPath` also handles partial-segment ellipses; if the tail does not start with the project folder, only a target the conversation mentioned is accepted | `toolcall.test.ts` |
 | 31 | release run 3 | a junk path (`…\2026-09-uite? self...?`, with a key named `"???"`) reached OpenCode and was denied with a misleading permission message | on Windows, path arguments containing `< > " \| ? *` are rejected with an explicit error (a wildcard in a glob's `path` → "use `pattern`") | `toolcall.test.ts`; fired 3× in the final verification runs |
 | 32 | release run 3, verification | a reply that was only a call-header fragment (` to=functions.read?`, ` to=functions.read?<\|constrain\|>??`) reached OpenCode as the final answer, ending the turn with nothing done | a raw reply that starts with a header fragment and yields no call is a protocol error → re-prompt | `toolcall.test.ts`; fired in `feature-median` verification (pass) |
+| 33 | README review | the OpenWebUI model was declared with a 131K window in OpenCode's config and the proxy profile, while the recommended Ollama setting is 32K: OpenCode would compact too late and Ollama would silently cut the conversation | the `openwebui` defaults are 32768 in both places, and `OPENWEBUI_CONTEXT_WINDOW` sets the proxy's window; the server guide says to keep server, OpenCode and proxy windows equal | `release.test.ts` |
 
 ## 3. OpenWebUI + Ollama (the production path)
 
@@ -135,8 +136,8 @@ Each was reproduced, fixed, and covered by a regression test (unit/contract) or 
 | Route A honours `options.num_ctx` (2048 → Ollama evaluated 1,026 of 4,403 prompt tokens, and the model **stopped calling tools**) | live | optional `numCtx`; truncation detector (prompt_tokens far below the sent size) → log + visible warning |
 | Route A: tool-result messages lose the tool name in OpenWebUI's converter (`payload.py:276-330` keeps role/content/tool_call_id only); gpt-oss's template renders `functions.{ToolName}` | source | route B preferred for Ollama-backed models; on route A tool results are labelled `[<tool> result]` |
 | Route B `/ollama/v1/chat/completions` maps preset → base model, applies preset params/system prompt, passes Ollama's OpenAI layer through (`routers/ollama.py:1319+`); Ollama resolves tool names from `tool_call_id` (`openai/openai.go:581,749`) and honours `max_tokens` (5 → 5, `finish_reason:"length"`) | live + source | `openwebuiRoute: "auto"` picks it when `/api/models` says `owned_by: "ollama"` |
-| Route B cannot set `num_ctx` per request (Ollama's OpenAI layer maps only stop/max_tokens/temperature/seed/penalties/top_p) | source | documented: set `OLLAMA_CONTEXT_LENGTH` on the server |
-| **Ollama default `num_ctx` = 4096 below 23 GiB VRAM** (32768 ≥ 23 GiB, 262144 ≥ 47 GiB; `server/routes.go:2105-2114`); on overflow Ollama drops the oldest non-system messages (`server/prompt.go:23-80`) | source; symptom reproduced live | README setup item #1; truncation detector |
+| Route B cannot set `num_ctx` per request (Ollama's OpenAI layer maps only stop/max_tokens/temperature/seed/penalties/top_p) | source | documented: set `OLLAMA_CONTEXT_LENGTH` on the server (README, "Set up your OpenWebUI server", step 1) |
+| **Ollama default `num_ctx` = 4096 below 23 GiB VRAM** (32768 ≥ 23 GiB, 262144 ≥ 47 GiB; `server/routes.go:2105-2114`); on overflow Ollama drops the oldest non-system messages (`server/prompt.go:23-80`) | source; symptom reproduced live | README, "Set up your OpenWebUI server", step 1; truncation detector |
 | Stream formats: route A = OpenWebUI converter (`"key": value` spacing, one complete tool call per chunk with `index/id/type/arguments` string, `reasoning_content`, usage with extra keys on the finish chunk); route B = Ollama (`delta.reasoning`, separate finish chunk, separate `choices:[]` usage chunk) | live captures | parser accepts both (fixtures in tests) |
 | A mid-stream Ollama error becomes an empty chunk `model:"ollama"`, `finish_reason:"stop"`, no usage (`utils/response.py:229-270`) | source | recognised → retried as a provider error |
 | Errors are `{"detail": ...}` (string/object/list); unknown model → 400 `"Model not found"` / `"Model '<id>' was not found"`; API keys **disabled by default** (`ENABLE_API_KEYS=False`, `config.py:2454`) → 403 | live + source | detail parsing; setup hints for auth and model id |
@@ -370,7 +371,7 @@ remaining failure is task quality (`fix-syntax`).
 ## 7. Reproducing
 
 ```bash
-npm test                                   # 118 offline tests
+npm test                                   # 119 offline tests
 npm run test:live                          # needs SILICONFLOW_API_KEY and/or OPENWEBUI_API_KEY (+ OPENWEBUI_BASE_URL, OPENWEBUI_MODEL)
 npm run eval -- --concurrency 1            # full live suite (~30 min on SiliconFlow's entry tier)
 npm run compare -- .eval-runs/<a> .eval-runs/<b>

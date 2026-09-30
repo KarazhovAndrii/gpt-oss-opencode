@@ -30,7 +30,7 @@
       "fallbackStrategy": "harmony",
       "stream": true,
       "maxOutputTokens": 8192,
-      "contextWindow": 131072,
+      "contextWindow": 32768,
       "extraBody": {},
       "toolDescriptions": "compact",
       "//numCtx": "route \"api\" only: e.g. 32768 is sent as options.num_ctx; on route \"ollama-v1\" set OLLAMA_CONTEXT_LENGTH on the Ollama server instead"

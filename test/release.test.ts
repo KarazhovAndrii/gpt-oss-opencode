@@ -52,6 +52,16 @@ test("config: content logging is off by default; env, file and the old key switc
   assert.throws(() => loadConfig({ GPT_OSS_LOG_RETENTION_DAYS: "-1" }, dir), /logRetentionDays/);
 });
 
+test("config: the OpenWebUI window defaults to the recommended Ollama context and can be overridden", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gptoss-cfg-"));
+  assert.equal(loadConfig({}, dir).profiles.openwebui.contextWindow, 32768);
+  assert.equal(loadConfig({ OPENWEBUI_CONTEXT_WINDOW: "65536" }, dir).profiles.openwebui.contextWindow, 65536);
+  assert.throws(() => loadConfig({ OPENWEBUI_CONTEXT_WINDOW: "32k" }, dir), /contextWindow/);
+  // the shipped OpenCode config tells OpenCode the same window
+  const oc = JSON.parse(fs.readFileSync(new URL("../opencode/opencode.json", import.meta.url), "utf8"));
+  assert.equal(oc.provider["gpt-oss"].models.openwebui.limit.context, 32768);
+});
+
 describe("proxy with default logging", () => {
   let up: MockUpstream;
   let px: TestProxy;

@@ -22,7 +22,7 @@
           "name": "gpt-oss-20b via OpenWebUI",
           "tool_call": true,
           "reasoning": true,
-          "limit": { "context": 131072, "output": 8192 }
+          "limit": { "context": 32768, "output": 8192 }
         }
       }
     }

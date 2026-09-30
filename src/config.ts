@@ -9,6 +9,7 @@
 //   GPT_OSS_LOG_CONTENT      1 = also log prompts, model output, tool arguments and result previews
 //   GPT_OSS_LOG_RETENTION_DAYS  delete log days older than this at startup and daily (0 = keep)
 //   <PROFILE>_BASE_URL / <PROFILE>_MODEL   e.g. OPENWEBUI_BASE_URL, SILICONFLOW_MODEL
+//   <PROFILE>_CONTEXT_WINDOW  the model server's real context length (tokens)
 
 import fs from "node:fs";
 import path from "node:path";
@@ -140,7 +141,9 @@ export const DEFAULT_PROFILES: Record<string, Profile> = {
     strategy: "auto",
     fallbackStrategy: "harmony",
     maxOutputTokens: 8192,
-    contextWindow: 131072,
+    // Must match the context length the Ollama server really uses (OLLAMA_CONTEXT_LENGTH);
+    // the README recommends 32768. Override with OPENWEBUI_CONTEXT_WINDOW.
+    contextWindow: 32768,
     toolDescriptions: "compact",
     stream: true,
     aliases: ["gpt-oss20b-opencode"],
@@ -178,6 +181,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
     if (env[`${prefix}_STRATEGY`]) p.strategy = env[`${prefix}_STRATEGY`] as Strategy;
     if (env[`${prefix}_ROUTE`]) p.openwebuiRoute = env[`${prefix}_ROUTE`] as Profile["openwebuiRoute"];
     if (env[`${prefix}_NUM_CTX`]) p.numCtx = Number(env[`${prefix}_NUM_CTX`]);
+    if (env[`${prefix}_CONTEXT_WINDOW`]) p.contextWindow = Number(env[`${prefix}_CONTEXT_WINDOW`]);
     if (env.GPT_OSS_STRATEGY) p.strategy = env.GPT_OSS_STRATEGY as Strategy;
     p.baseURL = p.baseURL.replace(/\/+$/, "");
   }
@@ -206,6 +210,7 @@ function validateConfig(cfg: Config) {
   for (const p of Object.values(cfg.profiles)) {
     if (!["native", "harmony", "json", "auto"].includes(p.strategy)) throw new Error(`profile ${p.name}: invalid strategy ${p.strategy}`);
     if (!/^https?:\/\//.test(p.baseURL)) throw new Error(`profile ${p.name}: baseURL must be http(s): ${p.baseURL}`);
+    if (!(p.contextWindow >= 4096)) throw new Error(`profile ${p.name}: contextWindow must be a number >= 4096 (got ${p.contextWindow})`);
   }
 }
 
