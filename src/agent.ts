@@ -81,6 +81,12 @@ export function contextUsage(last: LastCall | undefined, billed: Usage | undefin
 /** Native tool support learned at runtime for `auto` profiles. */
 export const nativeSupport = new Map<string, boolean>();
 
+/** Largest prompt (tokens) each model server evaluated in this process: its window is at least that. */
+const provenPrompt = new Map<string, number>();
+export function clearProvenPrompts() {
+  provenPrompt.clear();
+}
+
 const PASSTHROUGH_KEYS = ["temperature", "top_p", "reasoning_effort", "seed", "frequency_penalty", "presence_penalty"];
 
 export function newCallId(): string {
@@ -105,6 +111,16 @@ export interface RunContext {
 
 function diagnostic(message: string): string {
   return `[gpt-oss-proxy] ${message}`;
+}
+
+/** A tool step for a user-facing message: the command for bash, the arguments otherwise. */
+function describeStep(s: Step): string {
+  const args = (s.args ?? {}) as Record<string, unknown>;
+  if (s.name === "bash" && typeof args.command === "string") {
+    const timeout = Number(args.timeout ?? 0);
+    return `bash \`${truncate(args.command, 200)}\`${timeout ? ` (timeout ${Math.round(timeout / 1000)} s)` : ""}`;
+  }
+  return `${s.name} ${truncate(JSON.stringify(args), 200)}`;
 }
 
 /** What to do when the model server evaluated far fewer prompt tokens than were sent. */
@@ -269,6 +285,8 @@ export async function runChat(req: ChatRequest, ctx: RunContext): Promise<Outcom
   let empties = 0;
   // Tool whose call was just rejected as invalid; a bare JSON reply right after is its corrected arguments.
   let pendingRepairTool: string | undefined;
+  // Earlier step whose repetition the loop guard just refused to pass on.
+  let blocked: Step | undefined;
   // Calls accepted earlier in this same response also count for redundancy checks.
   const steps: Step[] = [...analysis.steps];
 
@@ -355,7 +373,12 @@ export async function runChat(req: ChatRequest, ctx: RunContext): Promise<Outcom
     // provider reports how many prompt tokens it actually evaluated.
     const sentTokens = estimateTokens((body.messages as ChatMessage[]) ?? []) + (body.tools ? Math.ceil(JSON.stringify(body.tools).length / 3.2) : 0);
     const seen = result.usage?.prompt_tokens ?? 0;
-    last = { usage: result.usage, sentTokens, truncated: seen > 0 && sentTokens > 3000 && seen < sentTokens * 0.6 };
+    // A server that already evaluated a prompt this large did not cut this one: the estimate is
+    // off (observed: "6,706 of ~11,400" right after the same server evaluated 26,094 tokens).
+    const server = `${target.profile.baseURL}|${target.profile.model}`;
+    const proven = provenPrompt.get(server) ?? 0;
+    if (seen > proven) provenPrompt.set(server, seen);
+    last = { usage: result.usage, sentTokens, truncated: seen > 0 && sentTokens > 3000 && seen < sentTokens * 0.6 && sentTokens > proven };
     if (last.truncated) {
       logger.event(session, "context_truncated", { req: reqId, iteration, promptTokensSeen: seen, estimatedPromptTokens: sentTokens });
       if (!truncationWarned) {
@@ -434,6 +457,7 @@ export async function runChat(req: ChatRequest, ctx: RunContext): Promise<Outcom
             hints++;
             logger.event(session, "redundant_call", { req: reqId, tool: v.call.name, key: cfg.logContent ? truncate(key, 300) : hashOf(key), action: "hint", hint: hints });
             adapter.feedback(extra, { name: v.call.name, rawArgs: v.call.argsJson }, redundantHint(prev), newCallId());
+            blocked = prev;
             rejected = true;
             break;
           }
@@ -458,11 +482,17 @@ export async function runChat(req: ChatRequest, ctx: RunContext): Promise<Outcom
         extra,
         result.finishReason === "length"
           ? "Your previous reply hit the output limit before producing an answer or a function call. Think briefly, then either call the next function or give the final answer."
-          : "Your previous reply contained neither a function call nor an answer. Continue the task: call the next function, or give the final answer if the request is complete.",
+          : blocked
+            ? "Your previous reply was empty. Do not repeat the call that was not executed. Reply to the user now: say what you ran, what the last result showed, and what is blocking the task."
+            : "Your previous reply contained neither a function call nor an answer. Continue the task: call the next function, or give the final answer if the request is complete.",
       );
       continue;
     }
-    return stop(`The model returned no answer and no tool call (${modelCalls} attempts, last finish_reason=${result.finishReason}).`, "empty_output");
+    // Show where the model got stuck instead of only that it did (observed: silent after
+    // `pip install` timed out twice; the user saw no output at all).
+    const lastStep = blocked ?? analysis.steps.at(-1);
+    const where = lastStep ? ` Its last step was ${describeStep(lastStep)}, which ended with: "${truncate(lastStep.result.replace(/\s+/g, " ").trim(), 300)}".` : "";
+    return stop(`The model stopped without an answer or a tool call (${modelCalls} attempts, last finish_reason=${result.finishReason}).${where} Send a follow-up message, for example asking for the current status or a different approach.`, "empty_output");
   }
   return stop(`Too many internal retries (${modelCalls} model calls) without a usable reply.`, "retry_budget");
 }

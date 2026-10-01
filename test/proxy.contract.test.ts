@@ -230,6 +230,25 @@ describe("harmony strategy", () => {
     assert.equal(resp.reportedUsage.prompt_tokens, 5300);
   });
 
+  test("silent after the loop guard blocked a repeat: asked to report, then the stop names the stuck step (observed)", async () => {
+    // Real session: pip install timed out at 120 s and 240 s, the 480 s retry was blocked, the
+    // model went silent twice and the user saw only "no answer and no tool call".
+    const pip = { command: "pip install -r doc/requirements.txt" };
+    const msgs: any[] = [{ role: "system", content: systemPrompt() }, { role: "user", content: "Deploy the test environment and run the basic tests." }];
+    for (const [i, timeout] of [120000, 240000].entries()) {
+      msgs.push({ role: "assistant", content: null, tool_calls: [{ id: `p${i}`, type: "function", function: { name: "bash", arguments: JSON.stringify({ ...pip, timeout }) } }] });
+      msgs.push({ role: "tool", tool_call_id: `p${i}`, content: `Collecting numpy\n<bash_metadata>bash tool terminated command after exceeding timeout ${timeout} ms</bash_metadata>` });
+    }
+    up.push(harmonyCall("bash", { ...pip, timeout: 480000 }), harmonyFinal("", ""), harmonyFinal("", ""));
+    const before = up.requests.length;
+    const r = await chat(px.url, base({ messages: msgs }));
+    const sent = up.requests.slice(before).map((q) => JSON.stringify(q.messages));
+    assert.equal(sent.length, 3);
+    assert.match(sent[1], /Do not run it again/, "the blocked retry is answered with the timeout hint");
+    assert.match(sent[2], /Reply to the user now/, "the silence is answered with a request to report");
+    assert.match(sseText(r.events), /stopped without an answer.*last step was bash `pip install -r doc\/requirements\.txt` \(timeout 240 s\), which ended with: "Collecting numpy/);
+  });
+
   test("requests without tools (title generation) return clean text", async () => {
     up.push({ kind: "json", content: "Explain entry point<|end|>", reasoning: "short title" });
     const r = await chat(px.url, { model: "mock", stream: true, messages: [{ role: "system", content: "Generate a title" }, { role: "user", content: "x" }] });

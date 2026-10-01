@@ -120,3 +120,13 @@ test("a wait loop that timed out gets no timeout escalation (observed in status-
   assert.equal(findRedundant(c.steps, canonicalKey("bash", short), short), undefined);
   assert.equal(findRedundant(analyzeTurn(turn(read("/a"))).steps, canonicalKey("bash", rewritten), rewritten), undefined);
 });
+
+test("a command that keeps timing out gets a hint to report to the user, not the generic one (observed: pip install)", () => {
+  const cmd = "pip install -r doc/requirements.txt";
+  const run = (timeout: number) => ["bash", { command: cmd, timeout }, `Collecting numpy\nbash tool terminated command after exceeding timeout ${timeout} ms`] as [string, object, string];
+  const a = analyzeTurn(turn(run(120000), run(240000)));
+  const prev = findRedundant(a.steps, canonicalKey("bash", { command: cmd, timeout: 480000 }), { command: cmd, timeout: 480000 });
+  assert.ok(prev, "a third, longer run is blocked");
+  assert.match(redundantHint(prev!), /Do not run it again\. Tell the user that it does not finish in time/);
+  assert.doesNotMatch(redundantHint(prev!), /still current/);
+});

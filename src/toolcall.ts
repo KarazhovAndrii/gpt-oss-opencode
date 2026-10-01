@@ -25,6 +25,16 @@ export type Validation =
 
 const PATH_KEYS = /^(filePath|file_path|filepath|path|workdir|cwd|directory|dir|filename)$/i;
 
+// File-name filters. In OpenCode a pattern without wildcards matches only a file named exactly
+// that ("config" finds nothing, "*config*" finds config.yaml; verified with OpenCode 1.18), but
+// gpt-oss uses bare words as name searches (one session: 9 of 14 globs found nothing).
+const NAME_FILTERS: Record<string, string> = { glob: "pattern", grep: "include" };
+// No wildcard, path separator or extension dot: "tests", "run_tests", "speed gauge".
+const BARE_WORD = /^[^*?[\]{}\/\\.]+$/;
+
+// Names gpt-oss uses for OpenCode's tools (observed: "search" for grep, 3 times in one session).
+const TOOL_ALIASES: Record<string, string> = { search: "grep" };
+
 /**
  * @param cwd OpenCode's working directory (from its system prompt), for path normalization.
  * @param grounded Conversation text (system, user, tool results) used to decide whether an
@@ -85,7 +95,15 @@ export function validateToolCall(p: ProposedCall, tools: ToolDef[], cwd?: string
     };
   }
 
-  const res = coerceAndValidate(params, args);
+  // "query" is what the model calls grep's pattern when it asks for a "search" tool (observed).
+  const props = params?.properties ?? {};
+  if ("query" in args && !("pattern" in args) && "pattern" in props && !("query" in props)) {
+    const { query, ...rest } = args;
+    args = { ...rest, pattern: query };
+    repairs.push(`renamed argument "query" -> "pattern"`);
+  }
+
+  const res = coerceAndValidate(params, args as Record<string, unknown>);
   repairs.push(...res.repairs);
   if (res.issues.length) {
     const details = res.issues.map((i) => `${i.path} ${i.message}`).join("; ");
@@ -104,6 +122,13 @@ export function validateToolCall(p: ProposedCall, tools: ToolDef[], cwd?: string
       delete finalArgs[k];
       repairs.push(`removed empty optional ${k}`);
     }
+  }
+  const nameFilter = NAME_FILTERS[tool.function.name];
+  const word = nameFilter ? finalArgs[nameFilter] : undefined;
+  if (typeof word === "string" && BARE_WORD.test(word.trim())) {
+    const pattern = `*${word.trim().split(/\s+/).join("*")}*`;
+    finalArgs[nameFilter] = pattern;
+    repairs.push(`bare-word ${nameFilter} ${JSON.stringify(word)} -> ${JSON.stringify(pattern)}`);
   }
   if (cwd) {
     for (const [k, v] of Object.entries(finalArgs)) {
@@ -137,7 +162,8 @@ export function validateToolCall(p: ProposedCall, tools: ToolDef[], cwd?: string
 
 export function resolveTool(name: string, tools: ToolDef[]): ToolDef | undefined {
   // Cut malformed headers such as `read>{"filePath":...}()` at the first non-identifier character.
-  const n = name.replace(/^functions[.:/]/, "").trim().replace(/[^A-Za-z0-9_.\-].*$/s, "");
+  // A harmony channel name fused onto the tool name: "read..commentary" (observed) -> "read".
+  const n = name.replace(/^functions[.:/]/, "").trim().replace(/[^A-Za-z0-9_.\-].*$/s, "").replace(/\.+(commentary|analysis|final)$/i, "");
   const exact = tools.find((t) => t.function.name === n);
   if (exact) return exact;
   // Content-type fused onto the name: "globjson" -> "glob" (only when that is an exact tool name).
@@ -151,7 +177,9 @@ export function resolveTool(name: string, tools: ToolDef[]): ToolDef | undefined
   if (ci) return ci;
   const squash = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
   const matches = tools.filter((t) => squash(t.function.name) === squash(n));
-  return matches.length === 1 ? matches[0] : undefined;
+  if (matches.length === 1) return matches[0];
+  const alias = TOOL_ALIASES[lower];
+  return alias ? tools.find((t) => t.function.name === alias) : undefined;
 }
 
 function isObj(v: unknown): v is Record<string, unknown> {

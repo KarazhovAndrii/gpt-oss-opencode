@@ -144,6 +144,11 @@ export function redundantHint(prev: Step): string {
   if (isTimedOutWait(prev)) {
     return `[not executed by the proxy] This command waits in a loop for a condition, and a loop waiting for it already ran until it timed out without the condition occurring. Waiting again, even with a longer timeout, will not change that unless something else changes the state. Check the state once (for example, read the file) and tell the user the current state.\nEarlier result (start):\n${preview}`;
   }
+  // Observed: `pip install` timed out at 120 s and 240 s; with the generic hint below the model
+  // went silent instead of telling the user.
+  if (prev.name === "bash" && TIMED_OUT.test(prev.result)) {
+    return `[not executed by the proxy] This command already ran until its timeout and was stopped; running it again, even with a longer timeout, will most likely end the same way. Do not run it again. Tell the user that it does not finish in time, show what its output says, and suggest a likely cause or what they can do (for example run it themselves, or check network access).\nEarlier result (start):\n${preview}`;
+  }
   const failed = prev.isError
     ? " It failed then and would fail the same way now; fix the cause first (for an edit, copy oldString exactly from the latest read output, or read the file again if it changed)."
     : " Its result (above) is still current.";

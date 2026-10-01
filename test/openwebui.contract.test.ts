@@ -11,6 +11,7 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { startMockUpstream, chunk, type MockUpstream } from "./helpers/mock-upstream.ts";
 import { startProxy, chat, systemPrompt, OPENCODE_TOOLS, type TestProxy } from "./helpers/proxy.ts";
 import { clearRouteCache } from "../src/openwebui.ts";
+import { clearProvenPrompts } from "../src/agent.ts";
 
 const API_SSE = fs.readFileSync(new URL("./fixtures/owui-api-stream-toolcall.sse", import.meta.url), "utf8");
 const OLLAMA_V1_SSE = fs.readFileSync(new URL("./fixtures/owui-ollamav1-stream-toolcall.sse", import.meta.url), "utf8");
@@ -28,6 +29,7 @@ describe("OpenWebUI profile", () => {
   after(async () => up.close());
   beforeEach(() => {
     clearRouteCache();
+    clearProvenPrompts();
     up.requests.length = 0;
     up.paths.length = 0;
   });
@@ -185,6 +187,22 @@ describe("OpenWebUI profile", () => {
       assert.match(warning, /evaluated only 1026 of ~\d+ prompt tokens - its context window is smaller than the 131072 tokens profile "openwebui" assumes/);
       assert.match(warning, /raise num_ctx .* to at least 131072, or set OPENWEBUI_CONTEXT_WINDOW \(contextWindow\) to the server's real context length/);
       assert.ok(px.events().some((e) => e.type === "context_truncated" && e.promptTokensSeen === 1026));
+    } finally {
+      await px.close();
+    }
+  });
+
+  test("no truncation warning for a prompt the same server already evaluated a larger one than (estimate off)", async () => {
+    // Observed: "evaluated only 6706 of ~11400" right after the same server evaluated 26,094 tokens.
+    up.setModels([{ id: MODEL, owned_by: "ollama" }]);
+    const reply = (prompt: number) => ({ kind: "sse" as const, chunks: [chunk({ content: "ok" }), chunk({}, "stop", { usage: { prompt_tokens: prompt, completion_tokens: 5, total_tokens: prompt + 5 } })] });
+    up.push(reply(26094), reply(1026));
+    const px = await proxy();
+    try {
+      await chat(px.url, base());
+      const r = await chat(px.url, base());
+      assert.doesNotMatch(r.events.map((e) => e.choices?.[0]?.delta?.reasoning_content ?? "").join(""), /evaluated only/);
+      assert.ok(!px.events().some((e) => e.type === "context_truncated"));
     } finally {
       await px.close();
     }

@@ -102,7 +102,9 @@ Verified from OpenWebUI 0.11.4 / Ollama 0.34.4 source and live against both:
   `{"detail": …}` errors (string, object or list) are read; 401/403 and "model not
   found" produce setup hints; and **context truncation** is detected from the provider's
   `prompt_tokens` (Ollama's default `num_ctx` is 4096 below 23 GiB VRAM, far below
-  OpenCode's 5–7K-token system prompt + tools).
+  OpenCode's 5–7K-token system prompt + tools). A shortfall is not reported for a prompt
+  no larger than one the same server already evaluated in full: the estimate is then off,
+  not the window (observed: "6,706 of ~11,400" right after a 26,094-token prompt).
 
 ### Per-request pipeline (`src/agent.ts`)
 
@@ -125,8 +127,9 @@ Verified from OpenWebUI 0.11.4 / Ollama 0.34.4 source and live against both:
    the start of a call header (`to=functions.read?`) is a protocol error and is
    re-prompted, not returned as the answer.
 7. **Validate** every call against the catalog OpenCode sent: tool exists (with
-   `functions.` prefix / case / separator normalization, and repair of malformed
-   harmony headers such as `globjson` or `read>{…}()`), arguments parse (strict,
+   `functions.` prefix / case / separator normalization, repair of malformed
+   harmony headers such as `globjson`, `read>{…}()` or `read..commentary`, and `search`
+   as `grep` with `query` as its `pattern`), arguments parse (strict,
    then single balanced object), schema check with conservative coercions
    (`"50"`→50, `null` optional removed, JSON-string arrays), path arguments
    normalized for the host (WSL `/mnt/c/…`, Git-Bash `/c/…`, relative → absolute,
@@ -142,7 +145,10 @@ Verified from OpenWebUI 0.11.4 / Ollama 0.34.4 source and live against both:
    such as `.eval-r...`) are expanded the same way. On Windows, a path argument with
    characters Windows forbids (`< > " | ? *`) is rejected with an explicit error
    rather than passed on, because OpenCode would deny it as an outside directory and
-   mislead the model. String contents are never rewritten.
+   mislead the model. String contents are never rewritten. A file-name filter that is a
+   bare word (`glob` pattern or `grep` include without wildcard, separator or dot, such as
+   `tests` or `config`) becomes `*word*`: OpenCode matches a bare word only as an exact
+   file name, and gpt-oss uses it as a name search (one session: 9 of 14 globs found nothing).
 8. **Repair** invalid calls by re-prompting with the exact error as a tool result
    (bounded, default 2); a bare-JSON reply right after a rejection is accepted as
    that tool's arguments.
@@ -152,7 +158,10 @@ Verified from OpenWebUI 0.11.4 / Ollama 0.34.4 source and live against both:
    A bash command that timed out may be re-run once with a larger timeout. Wait loops are
    the exception (`while`/`until` with `sleep`, `while true`, `tail -f`): after one timed
    out, re-running it or a rewritten wait loop with a longer timeout gets a hint instead.
-   The hint says to check the state once and report it.
+   The hint says to check the state once and report it. A command that timed out again
+   after its longer retry gets a hint to tell the user it does not finish in time. If the
+   model then replies with nothing, it is asked to report what it ran and what blocks it;
+   a turn that still ends empty names the last step and the start of its result.
 10. Emit OpenAI SSE: reasoning (`reasoning_content`), text, `tool_calls` (fresh ids),
     `finish_reason`, and usage as the context size (next section). The stream starts
     with the first output or keepalive, so an early error can still be an HTTP status.

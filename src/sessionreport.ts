@@ -107,7 +107,7 @@ export function timeline(ev: any[]): string[] {
         lines.push(`${t} ── request ${e.req} (${e.tools?.length ? `${e.strategy}, ${e.tools.length} tools` : "no tools"}, ${e.messages} msgs, turn step ${e.turnSteps})`);
         break;
       case "tool_result":
-        lines.push(`${t}    ← result ${e.name ?? "?"} ${e.isError ? "ERROR " : ""}(${e.chars} chars): ${String(e.preview).replace(/\s+/g, " ").slice(0, 110)}`);
+        lines.push(`${t}    ← result ${e.name ?? "?"} ${e.isError ? "ERROR " : ""}(${e.chars} chars)${e.preview === undefined ? "" : `: ${String(e.preview).replace(/\s+/g, " ").slice(0, 110)}`}`);
         break;
       case "model_output":
         lines.push(`${t}    model ${e.ms}ms tok=${e.usage?.prompt_tokens ?? "?"}/${e.usage?.completion_tokens ?? "?"}${e.proposed?.length ? ` proposes ${e.proposed.map((p: any) => `${p.name}(${String(p.args).slice(0, 90)})`).join(", ")}` : e.textChars ? ` text ${e.textChars} chars` : " (empty)"}${e.notes ? ` [${e.notes.join("; ")}]` : ""}`);

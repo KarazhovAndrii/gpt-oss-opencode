@@ -28,6 +28,29 @@ test("tool names: functions. prefix, case and separators are resolved", () => {
   assert.equal(ok(validateToolCall({ name: "todo_write", args: '{"todos":[]}' }, OPENCODE_TOOLS)).name, "todowrite");
 });
 
+test("a bare-word file pattern becomes a name search (OpenCode matches it only as an exact file name)", () => {
+  // Observed: glob "tests", "config", "yaml", "run_tests" all returned "No files found".
+  const g = (pattern: string) => ok(validateToolCall({ name: "glob", args: { pattern } }, OPENCODE_TOOLS)).args.pattern;
+  assert.equal(g("config"), "*config*");
+  assert.equal(g("run_tests"), "*run_tests*");
+  assert.equal(g(" speed gauge "), "*speed*gauge*");
+  for (const p of ["*.py", "**/tests/**", "package.json", "src/*.ts", "README.md", "[ab].txt"]) assert.equal(g(p), p, p);
+  const grep = ok(validateToolCall({ name: "grep", args: { pattern: "pytest", include: "pytest" } }, OPENCODE_TOOLS));
+  assert.deepEqual([grep.args.pattern, grep.args.include], ["pytest", "*pytest*"], "the search pattern itself is untouched");
+  assert.match(grep.repairs.join("; "), /bare-word include "pytest" -> "\*pytest\*"/);
+});
+
+test("a call to a 'search' tool is a grep, with query as its pattern (observed)", () => {
+  const c = ok(validateToolCall({ name: "search", args: { path: "/work/repo/tests", query: "dk_common" } }, OPENCODE_TOOLS, "/work/repo"));
+  assert.equal(c.name, "grep");
+  assert.equal(c.args.pattern, "dk_common");
+  assert.equal(c.args.query, undefined);
+  assert.match(c.repairs.join("; "), /resolved tool name "search" -> "grep".*renamed argument "query" -> "pattern"/);
+  // A fused harmony channel name (observed in the cpp-evaluator eval, which these two ended).
+  assert.equal(ok(validateToolCall({ name: "read..commentary", args: { filePath: "/a" } }, OPENCODE_TOOLS)).name, "read");
+  assert.equal(validateToolCall({ name: "...commentary", args: {} }, OPENCODE_TOOLS).ok, false);
+});
+
 test("malformed JSON is rejected with a precise, model-facing error", () => {
   const r = validateToolCall({ name: "glob", args: '{"pattern":"*.py","}' }, OPENCODE_TOOLS);
   assert.equal(r.ok, false);
