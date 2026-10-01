@@ -284,6 +284,7 @@ function summarize(results: ScenarioResult[]): string {
     `| cost (USD) | ${sum((r) => r.metrics.costUSD).toFixed(4)} |`,
     `| wall time | ${(sum((r) => r.wallMs) / 1000).toFixed(0)}s (avg ${(sum((r) => r.wallMs) / 1000 / Math.max(1, rs.length)).toFixed(0)}s) |`,
     `| redundant calls (hinted/passed) | ${sum((r) => r.metrics.redundantHints)}/${sum((r) => r.metrics.redundantPassthrough)} |`,
+    `| non-PowerShell commands (re-prompted/run) | ${sum((r) => r.metrics.shellReprompts ?? 0)}/${sum((r) => r.metrics.shellPassthrough ?? 0)} |`,
     `| guard stops | ${sum((r) => Object.values(r.metrics.guardStops).reduce((a, b) => a + b, 0))} |`,
     `| upstream errors (retried or reported) | ${sum((r) => r.metrics.upstreamErrors)} (rate-limit backoff ${(sum((r) => r.metrics.backoffMs ?? 0) / 1000).toFixed(0)}s) |`,
     `| uncorrelated tool results | ${sum((r) => r.metrics.uncorrelatedResults)} |`,

@@ -28,6 +28,9 @@ export function analyze(ev: any[]) {
   for (const s of stops) flags.push({ severity: "high", message: `turn stopped by the proxy (${s.kind}): ${String(s.reason).slice(0, 200)}` });
   const red = ev.filter((e) => e.type === "redundant_call");
   if (red.length) flags.push({ severity: red.some((r) => r.action === "passthrough") ? "high" : "medium", message: `${red.length} redundant call(s) proposed (${red.filter((r) => r.action === "hint").length} answered with a hint, ${red.filter((r) => r.action === "passthrough").length} passed through): ${[...new Set(red.map((r) => String(r.key).slice(0, 80)))].join("; ")}` });
+  const shellMis = ev.filter((e) => e.type === "shell_mismatch");
+  if (shellMis.length)
+    flags.push({ severity: "medium", message: `${shellMis.length} bash command(s) in bash/cmd.exe syntax for Windows PowerShell 5.1 (${shellMis.filter((s) => s.action === "reprompt").length} sent back with a fix, ${shellMis.filter((s) => s.action === "passthrough").length} run as written): ${[...new Set(shellMis.flatMap((s) => s.found ?? []))].join(", ")}` });
   // "aborted" = OpenCode closed the request (e.g. its title request when a run ends): not a provider problem.
   const upErr = ev.filter((e) => e.type === "upstream_error" && e.kind !== "aborted");
   if (upErr.length) {
@@ -117,6 +120,9 @@ export function timeline(ev: any[]): string[] {
         break;
       case "call_repaired":
         lines.push(`${t}    ~ repaired ${e.tool}: ${e.repairs.join("; ").slice(0, 160)}`);
+        break;
+      case "shell_mismatch":
+        lines.push(`${t}    ✗ not PowerShell 5.1 (${e.action}): ${(e.found ?? []).join(", ")} in ${String(e.command ?? "").slice(0, 100)}`);
         break;
       case "redundant_call":
         lines.push(`${t}    ↻ redundant ${e.tool} (${e.action})`);

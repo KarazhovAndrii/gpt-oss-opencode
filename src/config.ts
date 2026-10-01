@@ -70,6 +70,8 @@ export interface Limits {
   repairAttempts: number;
   /** Re-prompts when the model proposes a redundant call. */
   redundantHints: number;
+  /** Re-prompts for a bash command that cannot work in the host's shell (Windows PowerShell 5.1); then it runs as written. */
+  shellReprompts: number;
   /** Re-prompts when the model returns neither text nor a tool call. */
   emptyRetries: number;
   /** Redundant calls executed in one user turn before the proxy stops the turn. */
@@ -108,6 +110,7 @@ export const DEFAULT_LIMITS: Limits = {
   rateLimitBackoffMs: 5_000,
   repairAttempts: 2,
   redundantHints: 2,
+  shellReprompts: 2,
   emptyRetries: 1,
   maxRedundantPerTurn: 3,
   maxConsecutiveErrors: 8,

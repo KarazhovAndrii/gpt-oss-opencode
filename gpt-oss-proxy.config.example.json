@@ -57,6 +57,7 @@
     "rateLimitBackoffMs": 5000,
     "repairAttempts": 2,
     "redundantHints": 2,
+    "shellReprompts": 2,
     "emptyRetries": 1,
     "maxRedundantPerTurn": 3,
     "maxConsecutiveErrors": 8,

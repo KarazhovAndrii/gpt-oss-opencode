@@ -41,6 +41,9 @@ export interface ProxyMetrics {
   argRepairs: number;
   redundantHints: number;
   redundantPassthrough: number;
+  /** Bash commands that cannot work in Windows PowerShell 5.1: re-prompted / run as written. */
+  shellReprompts: number;
+  shellPassthrough: number;
   guardStops: Record<string, number>;
   upstreamErrors: number;
   upstreamErrorKinds: Record<string, number>;
@@ -68,6 +71,8 @@ export function proxyMetrics(ev: any[]): ProxyMetrics {
     argRepairs: 0,
     redundantHints: 0,
     redundantPassthrough: 0,
+    shellReprompts: 0,
+    shellPassthrough: 0,
     guardStops: {},
     upstreamErrors: 0,
     upstreamErrorKinds: {},
@@ -110,6 +115,10 @@ export function proxyMetrics(ev: any[]): ProxyMetrics {
       case "redundant_call":
         if (e.action === "hint") m.redundantHints++;
         else m.redundantPassthrough++;
+        break;
+      case "shell_mismatch":
+        if (e.action === "reprompt") m.shellReprompts++;
+        else m.shellPassthrough++;
         break;
       case "guard_stop":
         m.guardStops[e.kind] = (m.guardStops[e.kind] ?? 0) + 1;

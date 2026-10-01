@@ -15,6 +15,7 @@ import { validateToolCall, type ValidCall } from "./toolcall.ts";
 import { analyzeTurn, canonicalKey, findRedundant, redundantHint, isErrorResult, type Step } from "./guard.ts";
 import { adapterFor, type Adapter } from "./strategies.ts";
 import { compactTools } from "./compact.ts";
+import { detectShell, powershell51Feedback, powershell51Problems } from "./shell.ts";
 import { addUsage, callModel, costUSD, UpstreamError, type Usage } from "./upstream.ts";
 import type { ChatEmitter } from "./emitter.ts";
 import type { Logger } from "./log.ts";
@@ -254,7 +255,8 @@ export async function runChat(req: ChatRequest, ctx: RunContext): Promise<Outcom
   if (analysis.consecutiveErrors >= 3) {
     notes.push(`The last ${analysis.consecutiveErrors} tool calls failed. Stop and reconsider: re-read the relevant file or check the path before trying again, and do not repeat a failing call unchanged.`);
   }
-  const prompt = { cwd, objective, notes };
+  const shell = detectShell(tools);
+  const prompt = { cwd, objective, notes, shell };
 
   // Context guard: the proxy adds rules + the tool namespace that OpenCode does not
   // count, so keep the history within the provider window (oldest results first).
@@ -283,6 +285,7 @@ export async function runChat(req: ChatRequest, ctx: RunContext): Promise<Outcom
   let repairs = 0;
   let hints = 0;
   let empties = 0;
+  let shellReprompts = 0;
   // Tool whose call was just rejected as invalid; a bare JSON reply right after is its corrected arguments.
   let pendingRepairTool: string | undefined;
   // Earlier step whose repetition the loop guard just refused to pass on.
@@ -450,6 +453,21 @@ export async function runChat(req: ChatRequest, ctx: RunContext): Promise<Outcom
           return stop(`The model produced an invalid tool call ${repairs + 1} times in a row and was stopped. Last problem: ${v.error}`, `invalid_call_${v.code}`);
         }
         if (v.call.repairs.length) logger.event(session, "call_repaired", { req: reqId, tool: v.call.name, repairs: v.call.repairs });
+        // A command that cannot work in Windows PowerShell 5.1 (bash or cmd.exe syntax) goes back to the
+        // model with the reason and a working form. Once the budget is spent it runs as written: PowerShell's
+        // own error then tells the model, and the turn never stops over it.
+        const command = v.call.name === "bash" && shell === "powershell" ? String(v.call.args.command ?? "") : "";
+        const problems = command ? powershell51Problems(command) : [];
+        if (problems.length) {
+          const action = shellReprompts < limits.shellReprompts ? "reprompt" : "passthrough";
+          logger.event(session, "shell_mismatch", { req: reqId, shell, action, found: problems.map((p) => p.found), command: truncate(command, 200) });
+          if (action === "reprompt") {
+            shellReprompts++;
+            adapter.feedback(extra, { name: v.call.name, rawArgs: v.call.argsJson }, powershell51Feedback(command, problems), newCallId());
+            rejected = true;
+            break;
+          }
+        }
         const key = canonicalKey(v.call.name, v.call.args);
         const prev = findRedundant(steps, key, v.call.args);
         if (prev) {

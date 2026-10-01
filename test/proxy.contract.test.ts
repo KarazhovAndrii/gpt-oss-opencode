@@ -2,6 +2,7 @@
 // The AI SDK tests use the same provider package OpenCode uses, so they verify
 // that what the proxy emits is parsed into proper tool calls / text / reasoning.
 
+import fs from "node:fs";
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { streamText, generateText, tool, jsonSchema } from "ai";
@@ -520,6 +521,59 @@ describe("context guard", () => {
     } finally {
       await px.close();
       await up.close();
+    }
+  });
+});
+
+describe("Windows PowerShell 5.1 host (shell named in OpenCode's bash tool description)", () => {
+  const ps51 = fs.readFileSync(new URL("./fixtures/opencode-bash-powershell51.txt", import.meta.url), "utf8");
+  const withBash = (description: string) => OPENCODE_TOOLS.map((t: any) => (t.function.name === "bash" ? { ...t, function: { ...t.function, description } } : t));
+  const winBase = (tools: any[]) => base({ tools, messages: [{ role: "system", content: systemPrompt("C:\\proj", "win32") }, { role: "user", content: "Install the dependencies and run the tests." }] });
+  let up: MockUpstream;
+  let px: TestProxy;
+  before(async () => {
+    up = await startMockUpstream();
+    px = await startProxy(up.url);
+  });
+  after(async () => {
+    await px.close();
+    await up.close();
+  });
+
+  test("a bash-syntax command is sent back with the reason and a corrected command; the fixed call goes to OpenCode", async () => {
+    up.requests.length = 0;
+    up.push(harmonyCall("bash", { command: "npm install && npm test" }), harmonyCall("bash", { command: "npm install; if ($?) { npm test }" }));
+    const r = await chat(px.url, winBase(withBash(ps51)));
+    const calls = sseToolCalls(r.events);
+    assert.equal(calls.length, 1);
+    assert.equal(JSON.parse(calls[0].function.arguments).command, "npm install; if ($?) { npm test }");
+    assert.match(up.requests[0].messages[0].content, /The bash function runs Windows PowerShell 5\.1, not bash or cmd\.exe/);
+    const fb = up.requests[1].messages.at(-1).content;
+    assert.match(fb, /\[not executed by the proxy\] The bash function runs Windows PowerShell 5\.1[\s\S]*Corrected command: npm install; if \(\$\?\) \{ npm test \}/);
+    const ev = px.events().filter((e) => e.type === "shell_mismatch");
+    assert.deepEqual(ev.map((e) => [e.action, e.found]), [["reprompt", ["&&"]]]);
+    assert.ok(!px.events().some((e) => e.type === "validation_failure"), "not counted as an invalid tool call");
+  });
+
+  test("after the re-prompt budget the command runs as written: PowerShell's own error informs the model, the turn never stops", async () => {
+    up.requests.length = 0;
+    up.push(harmonyCall("bash", { command: "dir /s /b" }), harmonyCall("bash", { command: "dir /s /b" }), harmonyCall("bash", { command: "dir /s /b" }));
+    const r = await chat(px.url, winBase(withBash(ps51)));
+    assert.equal(up.requests.length, 3, "1 attempt + 2 re-prompts");
+    assert.equal(JSON.parse(sseToolCalls(r.events)[0].function.arguments).command, "dir /s /b");
+    assert.equal(sseFinish(r.events), "tool_calls");
+    assert.match(up.requests[1].messages.at(-1).content, /dir \/s \/b: .*glob function/);
+    assert.equal(px.events().filter((e) => e.type === "shell_mismatch" && e.action === "passthrough").length, 1);
+  });
+
+  test("bash and PowerShell 7 hosts are left alone (&& works there), and get no PowerShell 5.1 rule", async () => {
+    for (const tools of [OPENCODE_TOOLS, withBash(ps51.replace("Windows PowerShell (5.1)", "PowerShell (7+)"))]) {
+      up.requests.length = 0;
+      up.push(harmonyCall("bash", { command: "npm install && npm test" }));
+      const r = await chat(px.url, winBase(tools));
+      assert.equal(up.requests.length, 1);
+      assert.equal(JSON.parse(sseToolCalls(r.events)[0].function.arguments).command, "npm install && npm test");
+      assert.doesNotMatch(up.requests[0].messages[0].content, /Windows PowerShell 5\.1/);
     }
   });
 });

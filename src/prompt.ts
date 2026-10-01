@@ -2,13 +2,21 @@
 // Kept short: gpt-oss-20b follows a few concrete rules better than long prose.
 
 import { isWindowsPath } from "./toolcall.ts";
+import type { ShellKind } from "./shell.ts";
 
 export interface PromptContext {
   cwd?: string;
   objective: string;
   /** Extra one-off notes (e.g. "the last 4 tool calls failed"). */
   notes: string[];
+  /** Shell behind OpenCode's bash tool (from its description). */
+  shell?: ShellKind;
 }
+
+// gpt-oss writes bash and cmd.exe syntax for Windows PowerShell 5.1 (observed: `dir /b`,
+// `dir /s /b | findstr /i "speed"`); OpenCode's own shell notes sit deep in a long description.
+const POWERSHELL_51 =
+  "- The bash function runs Windows PowerShell 5.1, not bash or cmd.exe: chain dependent commands with `cmd1; if ($?) { cmd2 }` (no && or ||), set variables with `$env:NAME = \"value\"`, discard output with `2>$null`. grep, head, sed and cmd.exe switches (dir /s /b) do not work there; find and read files with the glob, grep and read functions.";
 
 // Retyping long absolute paths is a measured failure mode of gpt-oss-20b (digits
 // get changed). Relative paths are resolved deterministically by the proxy
@@ -33,6 +41,7 @@ export function operatingRules(ctx: PromptContext, mode: "harmony" | "json" | "n
     "- You know a file's content, a command's output or a test result only after a function result has shown it. Never describe, quote or summarize anything you have not received in a function result.",
     "- If the request involves finding, reading, changing or running something, do it with functions before answering. Never end your turn by announcing a next step - perform it.",
     `- ${platformLine(ctx.cwd)}`,
+    ...(ctx.shell === "powershell" ? [POWERSHELL_51] : []),
     "- To edit, copy oldString exactly from the latest read output, without the line-number prefix. If an edit fails, read the file again and retry with the exact current text. Never claim a change succeeded unless a function result confirms it.",
     "- To find something in a large file (logs, data, long sources), search it with grep or read a line range; do not read the whole file and scan it yourself.",
     "- Make each edit count: include enough surrounding lines for a unique match and change a whole logical block at once. Re-read a file after an edit only if you need its new content.",
