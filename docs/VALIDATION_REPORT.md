@@ -26,6 +26,7 @@ SiliconFlow was the provider used for the live measurements.
 |---|---|
 | **Release validation (final code)**, 16 scenarios incl. `cpp-evaluator` | **14/16**; the original 15: **14/15**; 87/91 checks; 95.4% first-attempt valid calls; 0 proxy stops; 0 uncorrelated results (section 4.5) |
 | Release validation, three earlier full runs (before the last four fixes) | 14/15, 14/15, 13/15 on the original 15; 0 proxy stops in all |
+| Full run after the context/compaction changes (release-5b, 2026-10-01) | **15/16**; the original 15: **15/15**; 96.7% first-attempt valid calls; the one proxy stop (`cpp-evaluator`, unknown `search` tool) is fixed by row 40, verified: `cpp-evaluator` 11/12, 0 stops (section 4.5) |
 | Linux (Ubuntu/WSL2), 8-scenario smoke run | **8/8**, 42/42 checks, 100% first-attempt valid calls |
 | gpt-oss-120b on SiliconFlow (section 4.6) | provider behaviour identical to 20b (native tools rejected); live tool round trip through the proxy **passes** (20 s); full evaluation not run |
 | Live OpenCode evaluation, 15 scenarios, v7 | **14/15 passed (93%)**, 76/79 checks |
@@ -320,6 +321,23 @@ Bar set beforehand: at least 13/15 on the original scenarios in every run, no pr
 | `feature-median` | pass | pass | fail | pass | proxy (rows 30–32), fixed; verification 2/3, then 3/3 with the final header check |
 | `cpp-evaluator` | 11/12 | 11/12 | 10/12 | 11/12 | model: evaluates while parsing (spec says parse first); in some runs off-by-one error positions or `2 ^ -1` |
 | the other 12 scenarios | pass | pass | pass | pass | |
+
+**Rerun after the context, compaction and session-log changes (2026-10-01, rows 34–42).**
+A first attempt (release-5) measured nothing: SiliconFlow was unreachable for 18 minutes
+and 12 of 16 scenarios stopped on "network error: fetch failed".
+
+| run | code | all 16 | original 15 | checks | first-attempt valid | proxy stops | uncorrelated | cost USD | wall time |
+|---|---|---|---|---|---|---|---|---|---|
+| release-5b | rows 34–38 (before 39–42) | **15/16** | **15/15** | 82/90 | 96.7% (119/123) | 1 | 0 | 0.043 | 1392s |
+| cpp-fixes (`cpp-evaluator` only) | rows 34–42 | — | — | 11/12 | 97.0% (32/33) | 0 | 0 | 0.024 | 1019s |
+
+`fix-syntax` passed this time (it fails about every other run; same cause as above). The
+proxy stop in release-5b was `cpp-evaluator` ending after three invalid calls in a row: two
+calls to a `search` tool and one to `read..commentary` (4/12 checks). With rows 39–40 the
+verification run had no stop: the proxy rewrote two bare-word globs (`tests`, `test_eval`)
+and one `search` call (to `grep`, `query` → `pattern`), and the scenario reached 11/12, its
+best result in any run. The remaining check fails for the known model reason (evaluates while
+parsing).
 
 Linux smoke run (Ubuntu under WSL2, same proxy code as release-1–3, 8 scenarios covering
 discovery, features, edits, large files, paths, JSON escaping and missing files): **8/8,
