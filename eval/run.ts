@@ -5,6 +5,7 @@
 //                    [--profile siliconflow|custom|openwebui|<name>] [--stream true|false] [--repeat N]
 //                    [--concurrency N] [--label name] [--extra-tools]
 //                    [--descriptions full|compact] [--reasoning low|medium|high]
+//                    [--shell bash|powershell|pwsh]
 //
 // Output: .eval-runs/<run>/results.json, summary.md, and per-scenario folders with
 // the repo after the run, OpenCode's JSON events and the proxy diagnostics.
@@ -17,7 +18,8 @@ import { loadConfig, type Strategy } from "../src/config.ts";
 import { createServer } from "../src/server.ts";
 import { Logger } from "../src/log.ts";
 import { SCENARIOS, type Scenario, type Check } from "./scenarios.ts";
-import { findOpenCode, isolatedHome, runOpenCode, type ToolUse } from "./lib/opencode.ts";
+import { findOpenCode, isolatedHome, plainWindowsPath, runOpenCode, shellPath, type EvalShell, type ToolUse } from "./lib/opencode.ts";
+import { detectShell, type ShellKind } from "../src/shell.ts";
 import { readProxyEvents, proxyMetrics, validCallRate, type ProxyMetrics } from "./lib/metrics.ts";
 import { startChaos } from "./lib/chaos.ts";
 
@@ -39,7 +41,14 @@ const concurrency = Number(opt("concurrency", "3"));
 const extraTools = has("extra-tools");
 const descriptions = opt("descriptions") as "full" | "compact" | undefined;
 const reasoning = opt("reasoning") as "low" | "medium" | "high" | undefined;
-const label = opt("label", `${strategy ?? "default"}${extraTools ? "+tools" : ""}${descriptions ? `-${descriptions}` : ""}${reasoning ? `-r${reasoning}` : ""}${streamOpt ? `-stream${streamOpt}` : ""}`)!;
+// OpenCode's shell (SHELL for its process); without --shell it is inherited from the caller.
+const shell = opt("shell") as EvalShell | undefined;
+if (shell && !["bash", "powershell", "pwsh"].includes(shell)) throw new Error(`--shell must be bash, powershell or pwsh, not ${shell}`);
+const shellExe = shell ? shellPath(shell) : undefined;
+const EXPECTED_SHELL: Record<EvalShell, ShellKind> = { bash: "posix", powershell: "powershell", pwsh: "pwsh" };
+// PowerShell runs get the PATH of a plain Windows machine (no Git Unix tools such as grep).
+const shellPathEnv = shell && shell !== "bash" && process.platform === "win32" ? plainWindowsPath(process.env.PATH ?? "") : undefined;
+const label = opt("label", `${strategy ?? "default"}${extraTools ? "+tools" : ""}${descriptions ? `-${descriptions}` : ""}${reasoning ? `-r${reasoning}` : ""}${streamOpt ? `-stream${streamOpt}` : ""}${shell ? `-${shell}` : ""}`)!;
 const runId = `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${label}`;
 const runDir = path.join(ROOT, ".eval-runs", runId);
 const sharedCache = path.join(ROOT, ".eval-runs", ".oc-cache");
@@ -77,6 +86,8 @@ export interface ScenarioResult {
   validCallRate?: number;
   answers: string[];
   dir: string;
+  /** Shell behind OpenCode's bash tool, read from the tool catalog in the proxy log. */
+  shellSeen?: ShellKind;
 }
 
 function copyDir(src: string, dst: string) {
@@ -149,6 +160,8 @@ async function runScenario(sc: Scenario, n: number): Promise<ScenarioResult> {
     permission: { edit: "allow", bash: "allow", webfetch: "deny", external_directory: "deny" },
   };
   const home = isolatedHome(path.join(dir, "oc"), ocConfig, sharedCache);
+  if (shellExe) home.env.SHELL = shellExe;
+  if (shellPathEnv) home.env.PATH = shellPathEnv;
   if (extraTools) {
     const toolDir = path.join(home.env.XDG_CONFIG_HOME, "opencode", "tool");
     copyDir(path.join(ROOT, "opencode", "tool"), toolDir);
@@ -195,6 +208,9 @@ async function runScenario(sc: Scenario, n: number): Promise<ScenarioResult> {
   const isolated = cwds.length > 0 && cwds.every((c) => c.toLowerCase() === path.resolve(repo).toLowerCase());
   checks.push({ name: "OpenCode worked inside the isolated repo", pass: isolated, detail: isolated ? undefined : `cwd(s): ${cwds.join(", ")}` });
   const metrics = proxyMetrics(proxy);
+  const catalog = proxy.find((e) => e.type === "tool_catalog");
+  const shellSeen = catalog ? detectShell(catalog.tools ?? []) : undefined;
+  if (shell && shellSeen && shellSeen !== EXPECTED_SHELL[shell]) console.error(`!!! ${sc.id}: --shell ${shell} requested, but OpenCode's bash tool runs ${shellSeen} (SHELL=${shellExe})`);
   const toolsByName: Record<string, number> = {};
   for (const t of tools) toolsByName[t.tool] = (toolsByName[t.tool] ?? 0) + 1;
   const result: ScenarioResult = {
@@ -215,6 +231,7 @@ async function runScenario(sc: Scenario, n: number): Promise<ScenarioResult> {
     suspendedMs: suspendedMs || undefined,
     answers,
     dir: path.relative(ROOT, dir),
+    shellSeen,
   };
   fs.writeFileSync(path.join(dir, "result.json"), JSON.stringify(result, null, 2));
   const mark = result.pass ? "PASS" : "FAIL";
@@ -254,7 +271,7 @@ function summarize(results: ScenarioResult[]): string {
   const lines = [
     `# Eval run ${runId}`,
     "",
-    `strategy=${strategy ?? "(profile default)"} profile=${profileName} stream=${streamOpt ?? "(profile default)"} descriptions=${descriptions ?? "(profile default)"} reasoning=${reasoning ?? "(provider default)"} extraTools=${extraTools} repeat=${repeat}`,
+    `strategy=${strategy ?? "(profile default)"} profile=${profileName} stream=${streamOpt ?? "(profile default)"} descriptions=${descriptions ?? "(profile default)"} reasoning=${reasoning ?? "(provider default)"} extraTools=${extraTools} repeat=${repeat} shell=${shell ? `${shell} (${shellExe})` : "(inherited)"}${shellPathEnv ? " PATH=plain Windows (no Git Unix tools)" : ""} shellSeen=${[...new Set(rs.map((r) => r.shellSeen ?? "?"))].join(",")}`,
     "",
     `| metric | value |`,
     `|---|---|`,
@@ -308,7 +325,7 @@ if (!selected.length) {
   process.exit(2);
 }
 fs.mkdirSync(runDir, { recursive: true });
-console.log(`eval run ${runId}: ${selected.length} scenario(s) x ${repeat}, concurrency ${concurrency}, opencode=${opencodeBin}`);
+console.log(`eval run ${runId}: ${selected.length} scenario(s) x ${repeat}, concurrency ${concurrency}, opencode=${opencodeBin}, shell=${shellExe ?? `(inherited SHELL=${process.env.SHELL ?? ""})`}`);
 const jobs = selected.flatMap((s) => Array.from({ length: repeat }, (_, i) => ({ s, n: i + 1 })));
 const before = treeFingerprint();
 async function runValid(sc: Scenario, n: number): Promise<ScenarioResult> {
@@ -325,7 +342,7 @@ const touched = [...new Set([...before.keys(), ...after.keys()])].filter((k) => 
 if (touched.length) console.error(`
 !!! WARNING: files in the implementation tree changed during the eval run: ${touched.join(", ")}
 `);
-fs.writeFileSync(path.join(runDir, "results.json"), JSON.stringify({ runId, strategy, profile: profileName, stream: streamOpt, descriptions, reasoning, extraTools, repeat, results }, null, 2));
+fs.writeFileSync(path.join(runDir, "results.json"), JSON.stringify({ runId, strategy, profile: profileName, stream: streamOpt, descriptions, reasoning, extraTools, repeat, shell, shellExe, results }, null, 2));
 const md = summarize(results);
 fs.writeFileSync(path.join(runDir, "summary.md"), md);
 console.log(`\n${md}\n\nresults: ${path.relative(ROOT, runDir)}`);

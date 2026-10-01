@@ -16,6 +16,48 @@ export function findOpenCode(): string {
   return "opencode";
 }
 
+export type EvalShell = "bash" | "powershell" | "pwsh";
+
+/**
+ * Executable for OpenCode's SHELL. OpenCode 1.18 on Windows uses $SHELL when it is set and
+ * resolvable, otherwise the first of pwsh, powershell, Git Bash, %COMSPEC%: an unset SHELL
+ * gives pwsh 7 on a host that has it, so Windows PowerShell 5.1 needs its full path.
+ */
+export function shellPath(shell: EvalShell): string {
+  const where = (exe: string) => {
+    try {
+      return execFileSync(process.platform === "win32" ? "where.exe" : "which", [exe], { encoding: "utf8" }).split(/\r?\n/)[0].trim() || undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const first = (cands: (string | undefined)[], what: string) => {
+    const hit = cands.find((c) => c && fs.existsSync(c));
+    if (!hit) throw new Error(`--shell ${shell}: ${what} not found`);
+    return hit;
+  };
+  if (process.platform !== "win32") return first([where(shell === "powershell" ? "pwsh" : shell)], shell);
+  const pf = process.env.ProgramFiles ?? "C:\\Program Files";
+  const sysRoot = process.env.SystemRoot ?? "C:\\Windows";
+  if (shell === "powershell") return first([path.join(sysRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")], "Windows PowerShell 5.1");
+  if (shell === "pwsh") return first([path.join(pf, "PowerShell", "7", "pwsh.exe"), where("pwsh")], "pwsh (PowerShell 7)");
+  return first([path.join(pf, "Git", "bin", "bash.exe"), where("bash")], "Git Bash");
+}
+
+/**
+ * PATH as a default Git for Windows install leaves it: git.exe (Git\cmd) but no Unix tools.
+ * A harness started from Git Bash (or a host whose PATH has Git\usr\bin, like the eval machine)
+ * would otherwise let `grep`, `head` or `sed` work inside PowerShell, which they do not on a
+ * typical Windows machine.
+ */
+export function plainWindowsPath(envPath: string): string {
+  const unixTools = /[\\/]Git[\\/](usr|mingw64|bin)([\\/]|$)/i;
+  const dirs = envPath.split(";").filter((d) => d && !unixTools.test(d));
+  const gitCmd = path.join(process.env.ProgramFiles ?? "C:\\Program Files", "Git", "cmd");
+  if (fs.existsSync(path.join(gitCmd, "git.exe")) && !dirs.some((d) => d.toLowerCase().replace(/[\\/]+$/, "") === gitCmd.toLowerCase())) dirs.push(gitCmd);
+  return [...new Set(dirs)].join(";");
+}
+
 export interface ToolUse {
   tool: string;
   input: any;
@@ -91,10 +133,12 @@ export function runOpenCode(opts: { bin: string; cwd: string; env: Record<string
   const args = ["run", "-m", opts.model, "--format", "json", "--dir", opts.cwd];
   if (opts.sessionId) args.push("--session", opts.sessionId);
   const t0 = Date.now();
+  // Windows env names are case-insensitive, but spreading process.env keeps "Path": drop it when PATH is overridden.
+  const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !(k.toUpperCase() === "PATH" && "PATH" in opts.env)));
   return new Promise((resolve) => {
     const child = spawn(opts.bin, args, {
       cwd: opts.cwd,
-      env: { ...process.env, ...opts.env, PWD: opts.cwd, INIT_CWD: opts.cwd },
+      env: { ...base, ...opts.env, PWD: opts.cwd, INIT_CWD: opts.cwd },
       // The prompt goes through stdin: on Windows, OpenCode (Bun) receives argv
       // prompts containing quotes with the quotes wrapped and escaped (\"), while
       // stdin arrives byte-exact. OpenCode reads stdin until EOF, so close it.
