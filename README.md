@@ -155,8 +155,11 @@ merge the `provider` block into it; a project's own `opencode.json` works as wel
 - `apiKey` is a placeholder: provider keys stay with the proxy, not OpenCode.
 - `limit.context` is the model's window. Set it to your provider's real context length
   (and the same number in `CUSTOM_CONTEXT_WINDOW`). OpenCode then compacts long
-  conversations before they overflow. 32768 is a safe default; hosted providers often
-  allow 131072.
+  conversations before they overflow: once a reply's tokens reach `limit.context −
+  limit.output`, or when the provider reports an overflow. The proxy reports the
+  conversation's real size for this (internal retries and trimming don't distort it). 32768
+  is a safe default; hosted providers often allow 131072. Without a `limit`, OpenCode never
+  compacts on its own.
 
 ### 3. Run a task
 

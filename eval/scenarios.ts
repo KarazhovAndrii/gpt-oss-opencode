@@ -302,9 +302,12 @@ export const SCENARIOS: Scenario[] = [
   },
   {
     id: "long-session-compaction",
-    title: "Three-turn session with a small context window (forces OpenCode compaction)",
+    title: "Three-turn session with a small context window (recall across turns)",
     fixture: "js-stats",
-    covers: ["long-conversation", "context-compaction", "objective-preservation", "validation-after-change"],
+    covers: ["long-conversation", "objective-preservation", "validation-after-change"],
+    // Peaks around 8K tokens, below OpenCode's compaction threshold here (context - output = 16K): it
+    // compacted only while the proxy summed usage over internal retries. A window small enough to
+    // compact for real (12000) thrashes instead: OpenCode's ~5K fixed prompt leaves too little room.
     modelLimit: { context: 20000, output: 4000 },
     timeoutMs: 600_000,
     turns: [

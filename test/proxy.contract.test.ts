@@ -211,11 +211,23 @@ describe("harmony strategy", () => {
   });
 
   test("non-streaming clients get a chat.completion with tool_calls", async () => {
-    up.push(harmonyCall("read", { filePath: "/work/repo/x.py" }));
+    up.push({ ...harmonyCall("read", { filePath: "/work/repo/x.py" }), usage: { prompt_tokens: 5000, completion_tokens: 10, total_tokens: 5010 } });
     const r = await chat(px.url, base({ stream: false }));
     assert.equal(r.json.choices[0].finish_reason, "tool_calls");
     assert.equal(r.json.choices[0].message.tool_calls[0].function.name, "read");
-    assert.equal(r.json.usage.total_tokens, 110);
+    assert.equal(r.json.usage.total_tokens, 5010);
+  });
+
+  test("OpenCode gets the context size as usage: internal retries are not added up (billed usage stays in the log)", async () => {
+    // Summed retries made OpenCode compact a session at half its real size (eval release-4).
+    up.push({ ...harmonyCall("reed", { filePath: "/work/repo/x.py" }), usage: { prompt_tokens: 5000, completion_tokens: 40, total_tokens: 5040 } });
+    up.push({ ...harmonyCall("read", { filePath: "/work/repo/x.py" }), usage: { prompt_tokens: 5300, completion_tokens: 30, total_tokens: 5330 } });
+    const r = await chat(px.url, base({ stream: false }));
+    assert.equal(r.json.choices[0].message.tool_calls[0].function.name, "read");
+    assert.deepEqual([r.json.usage.prompt_tokens, r.json.usage.completion_tokens], [5300, 70]);
+    const resp = px.events().filter((e) => e.type === "response").at(-1);
+    assert.equal(resp.usage.prompt_tokens, 10_300, "billed: both calls");
+    assert.equal(resp.reportedUsage.prompt_tokens, 5300);
   });
 
   test("requests without tools (title generation) return clean text", async () => {
@@ -436,6 +448,9 @@ describe("context guard", () => {
       assert.match(reasoning(r1.events), /your message is about \d+ tokens, more than fits in the model's context window \(32768 tokens\).*save it to a file/);
       const trimmed = px.events().find((e) => e.type === "context_trimmed");
       assert.deepEqual(trimmed.cuts.map((c: any) => [c.role, c.chars]), [["user", paste.length]]);
+      // OpenCode is told the conversation's real size, so it compacts instead of the proxy cutting forever.
+      const reported = r1.events.find((e) => e.usage)?.usage;
+      assert.ok(reported.prompt_tokens >= trimmed.estTokens[0] - trimmed.estTokens[1], `reported ${reported.prompt_tokens}`);
 
       // Next turn: the paste is still in OpenCode's history; still cut, but no repeated notice.
       up.push(harmonyFinal("Done."));
@@ -443,6 +458,46 @@ describe("context guard", () => {
       assert.ok(JSON.stringify(up.requests[1].messages).length < 32_768 * 3.2);
       assert.match(JSON.stringify(up.requests[1].messages), /Add a table of contents\./);
       assert.doesNotMatch(reasoning(r2.events), /your message is about/);
+    } finally {
+      await px.close();
+      await up.close();
+    }
+  });
+
+  test("a provider context overflow reaches OpenCode as an HTTP 400 it compacts on, not as an answer", async () => {
+    const up = await startMockUpstream();
+    const px = await startProxy(up.url);
+    const overflow = { kind: "status" as const, status: 400, body: JSON.stringify({ error: { message: "This model's maximum context length is 32768 tokens. However, your messages resulted in 40123 tokens.", type: "invalid_request_error" } }) };
+    try {
+      up.push(overflow);
+      const provider = createOpenAICompatible({ name: "gpt-oss", baseURL: px.url, includeUsage: true });
+      const result = streamText({ model: provider.chatModel("mock"), system: systemPrompt(), prompt: USER.content, tools: { glob: tool({ description: "glob", inputSchema: jsonSchema({ type: "object", properties: { pattern: { type: "string" } } }) }) } });
+      const parts: any[] = [];
+      for await (const p of result.fullStream) parts.push(p);
+      const err = parts.find((p) => p.type === "error")?.error;
+      // OpenCode classifies this (status 400 + /context[_ ]length[_ ]exceeded/) as ContextOverflowError.
+      assert.equal(err?.statusCode, 400);
+      assert.match(err.message, /context_length_exceeded: provider "mock" rejected the request as longer than the model's context window/);
+      assert.ok(px.events().some((e) => e.type === "overflow_reported"));
+
+      // Once the stream has started (here: the notice about a cut message), the diagnostic text is the fallback.
+      up.push(overflow);
+      const r = await chat(px.url, base({ messages: [{ role: "system", content: systemPrompt() }, { role: "user", content: "z".repeat(600_000) }] }));
+      assert.equal(r.status, 200);
+      assert.match(sseText(r.events), /run \/compact in OpenCode/);
+
+      // Overflow again right after OpenCode compacted: another 400 would loop compaction and retry
+      // (observed with OpenCode 1.18), so the turn ends with a diagnostic instead.
+      up.push(overflow);
+      const compacted = [
+        { role: "system", content: systemPrompt() },
+        { role: "user", content: "What did we do so far?" },
+        { role: "assistant", content: "## Goal\nExplain the entry point." },
+        { role: "user", content: "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed." },
+      ];
+      const r3 = await chat(px.url, base({ messages: compacted }));
+      assert.equal(r3.status, 200);
+      assert.match(sseText(r3.events), /still does not fit right after OpenCode compacted the conversation.*limit\.context in opencode\.json and MOCK_CONTEXT_WINDOW/);
     } finally {
       await px.close();
       await up.close();

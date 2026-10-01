@@ -31,11 +31,14 @@ export class ChatEmitter {
     this.includeUsage = opts.includeUsage;
     this.model = opts.model;
     this.id = opts.id;
+    // The stream starts with the first output or keepalive, so an error that comes first (a
+    // context overflow from the provider) can still be a real HTTP status: OpenCode compacts
+    // the session on a 400 overflow error, but not on an error chunk inside a 200 stream.
     if (this.stream) {
-      res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
-      this.started = true;
-      this.chunk({ role: "assistant", content: "" });
-      this.keepalive = setInterval(() => this.write(": keepalive\n\n"), opts.keepaliveMs ?? 10_000);
+      this.keepalive = setInterval(() => {
+        this.start();
+        this.write(": keepalive\n\n");
+      }, opts.keepaliveMs ?? 10_000);
     }
   }
 
@@ -43,11 +46,24 @@ export class ChatEmitter {
     return this.finished;
   }
 
+  /** Whether the response status is still open (nothing has been sent yet). */
+  get canSendStatus() {
+    return !this.started && !this.res.headersSent;
+  }
+
+  private start() {
+    if (!this.stream || this.started) return;
+    this.started = true;
+    this.res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" });
+    this.chunk({ role: "assistant", content: "" });
+  }
+
   private write(s: string) {
     if (!this.res.writableEnded && !this.res.destroyed) this.res.write(s);
   }
 
   private chunk(delta: Record<string, unknown>, finish: string | null = null) {
+    this.start();
     const payload = { id: this.id, object: "chat.completion.chunk", created: this.created, model: this.model, choices: [{ index: 0, delta, finish_reason: finish }] };
     this.write(`data: ${JSON.stringify(payload)}\n\n`);
   }
@@ -103,18 +119,19 @@ export class ChatEmitter {
     this.res.end(JSON.stringify(body));
   }
 
-  /** Protocol-level failure before anything useful was produced. */
-  fail(status: number, message: string, type = "proxy_error") {
+  /** Protocol-level failure: an HTTP error while nothing was sent yet, else an error chunk. */
+  fail(status: number, message: string, type = "proxy_error", code?: string) {
     if (this.finished) return;
     this.finished = true;
     if (this.keepalive) clearInterval(this.keepalive);
-    if (this.stream) {
-      this.write(`data: ${JSON.stringify({ error: { message, type } })}\n\n`);
+    const error = { message, type, ...(code ? { code } : {}) };
+    if (this.stream && this.started) {
+      this.write(`data: ${JSON.stringify({ error })}\n\n`);
       this.res.end();
       return;
     }
     this.res.writeHead(status, { "content-type": "application/json" });
-    this.res.end(JSON.stringify({ error: { message, type } }));
+    this.res.end(JSON.stringify({ error }));
   }
 
   abort() {

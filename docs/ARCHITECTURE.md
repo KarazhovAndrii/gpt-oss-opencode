@@ -154,7 +154,32 @@ Verified from OpenWebUI 0.11.4 / Ollama 0.34.4 source and live against both:
    out, re-running it or a rewritten wait loop with a longer timeout gets a hint instead.
    The hint says to check the state once and report it.
 10. Emit OpenAI SSE: reasoning (`reasoning_content`), text, `tool_calls` (fresh ids),
-    `finish_reason`, and usage summed over all internal attempts.
+    `finish_reason`, and usage as the context size (next section). The stream starts
+    with the first output or keepalive, so an early error can still be an HTTP status.
+
+### Compaction: OpenCode's, steered by the proxy
+
+OpenCode compacts a session (summarizes it with the model, then continues from the
+summary) when a response's prompt + completion tokens reach `limit.context −
+limit.output`, or when a request fails with a context-overflow error it recognizes.
+The proxy feeds both signals (verified end to end with OpenCode 1.18.29; before → after):
+
+- **Usage is the context size, not the bill.** The prompt figure is the last model call's
+  prompt, not a sum over internal retries; summed retries made OpenCode compact at half the
+  real size (`long-session-compaction`, release run 4: 16,197 and 17,147 reported against a
+  16,000 threshold, real prompt ~8K). It is the proxy's estimate when the server silently cut
+  the prompt, and it includes what the context guard trimmed. Otherwise OpenCode never
+  sees the overflow and the proxy trims every request (a pasted document never left the
+  history). Billed usage (all calls) stays in the proxy log and cost.
+- **A provider overflow becomes an HTTP 400 `context_length_exceeded`** while nothing has
+  been streamed yet; OpenCode then compacts and retries. An error chunk inside a 200
+  stream is reported by OpenCode as an unknown error, without compaction. Once the stream
+  has started, the fallback is a diagnostic asking for `/compact`. An overflow on OpenCode's
+  first request after a compaction also gets the diagnostic (the window is then misconfigured),
+  because another 400 makes OpenCode compact and retry in a loop (observed: a dozen rounds).
+- **The objective survives compaction.** OpenCode's follow-up ("Continue if you have next
+  steps…", or its retry note after an overflow) is not the task; the "current user request"
+  is then taken from the summary.
 
 ### What is deliberately *not* here
 

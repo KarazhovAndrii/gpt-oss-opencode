@@ -131,6 +131,25 @@ test("fitContext reports the true omission when a message is cut twice", async (
   assert.equal((user.match(/omitted by gpt-oss-proxy/g) ?? []).length, 1, "one omission note, not nested ones");
 });
 
+test("after OpenCode compacted a session, the objective comes from the summary, not its follow-up", () => {
+  // Shape OpenCode 1.18 sends after compaction (captured with a probe).
+  const msgs: any[] = [
+    { role: "system", content: "sys" },
+    { role: "user", content: "What did we do so far?" },
+    { role: "assistant", content: "## Goal\nAdd mode() to src/stats.js with tests.\n## Progress\nmode() written, tests not run yet." },
+    { role: "user", content: "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed." },
+  ];
+  assert.match(currentObjective(msgs), /^Continue the task described in this summary of the conversation so far:\n## Goal\nAdd mode\(\)/);
+  msgs[3] = { role: "user", content: "The previous request exceeded the provider's size limit due to large media attachments." };
+  assert.match(currentObjective(msgs), /Add mode\(\) to src\/stats\.js/);
+  // Compacted after a final answer: OpenCode keeps that answer between the summary and the follow-up.
+  msgs.splice(3, 0, { role: "assistant", content: "Done: mode() added." });
+  msgs[4] = { role: "user", content: "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed." };
+  assert.match(currentObjective(msgs), /summary of the conversation so far:\n## Goal\nAdd mode\(\)/);
+  msgs[4] = { role: "user", content: "Now also add median()." };
+  assert.equal(currentObjective(msgs), "Now also add median().", "a real follow-up after a manual /compact is the objective");
+});
+
 test("currentObjective keeps both ends of a long request", () => {
   const t = `Convert this:\n${"y".repeat(5000)}\nto an HTML table.`;
   const o = currentObjective([{ role: "user", content: t }]);

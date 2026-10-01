@@ -22,12 +22,12 @@ export interface MockUpstream {
   close(): Promise<void>;
 }
 
-export function harmonyCall(name: string, args: object | string, analysis = "Need to call a tool."): Reply {
+export function harmonyCall(name: string, args: object | string, analysis = "Need to call a tool."): Extract<Reply, { kind: "json" }> {
   const a = typeof args === "string" ? args : JSON.stringify(args);
   return { kind: "json", content: `${analysis}<|end|><|start|>assistant<|channel|>commentary to=functions.${name} <|constrain|>json<|message|>${a}` };
 }
 
-export function harmonyFinal(text: string, reasoning = "Done."): Reply {
+export function harmonyFinal(text: string, reasoning = "Done."): Extract<Reply, { kind: "json" }> {
   return { kind: "json", content: text, reasoning };
 }
 

@@ -7,7 +7,7 @@ import crypto from "node:crypto";
 import type { Config, Profile } from "./config.ts";
 import { envPrefix } from "./config.ts";
 import type { ChatMessage } from "./messages.ts";
-import { currentObjective, estimateTokens, findWorkingDirectory, fitContext, lastUserIndex, normalizeHistory, textOf } from "./messages.ts";
+import { afterCompaction, currentObjective, estimateTokens, findWorkingDirectory, fitContext, lastUserIndex, normalizeHistory, textOf } from "./messages.ts";
 import { resolveTarget } from "./openwebui.ts";
 import type { ToolDef } from "./harmony.ts";
 import { interpretHarmony, stripHarmonyTokens } from "./harmony.ts";
@@ -39,9 +39,43 @@ export interface Outcome {
   calls: (ValidCall & { id: string })[];
   text: string;
   modelCalls: number;
+  /** Billed usage: all model calls of this request (log, cost). */
   usage?: Usage;
+  /** Usage reported to OpenCode: the context size, which drives its compaction (see contextUsage). */
+  reportedUsage?: Usage;
   diagnostic?: string;
+  /** The provider rejected the request as too long for its context window (message for OpenCode). */
+  overflow?: string;
   strategy: string;
+}
+
+interface LastCall {
+  usage?: Usage;
+  /** Estimated prompt tokens sent. */
+  sentTokens: number;
+  /** The server evaluated far fewer prompt tokens than were sent (silent truncation). */
+  truncated: boolean;
+}
+
+/**
+ * Usage reported to OpenCode. OpenCode compacts a session once prompt + completion reaches
+ * limit.context - limit.output, so the prompt figure must be the size of the conversation: the
+ * last model call's prompt (internal retries are not added up, or OpenCode compacts far too early),
+ * the proxy's estimate when the server silently cut the prompt, plus whatever the context guard
+ * trimmed (or OpenCode never sees the overflow and the proxy keeps trimming). Without provider
+ * usage the figures are estimates. Billed usage stays in the proxy log and cost.
+ */
+export function contextUsage(last: LastCall | undefined, billed: Usage | undefined, trimmedTokens: number, outputChars: number): Usage | undefined {
+  if (!last) return undefined;
+  const prompt = (last.truncated || !last.usage ? last.sentTokens : last.usage.prompt_tokens) + trimmedTokens;
+  const completion = billed?.completion_tokens ?? Math.ceil(outputChars / 3.2);
+  return {
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    total_tokens: prompt + completion,
+    ...(billed?.reasoning_tokens ? { reasoning_tokens: billed.reasoning_tokens } : {}),
+    ...(last.usage?.cached_tokens ? { cached_tokens: Math.min(last.usage.cached_tokens, prompt) } : {}),
+  };
 }
 
 /** Native tool support learned at runtime for `auto` profiles. */
@@ -159,9 +193,12 @@ export async function runChat(req: ChatRequest, ctx: RunContext): Promise<Outcom
 
   let usage: Usage | undefined;
   let modelCalls = 0;
-  const finish = (o: Omit<Outcome, "modelCalls" | "usage" | "strategy" | "calls"> & { calls: ValidCall[] }): Outcome => {
+  let last: LastCall | undefined;
+  let trimmedTokens = 0;
+  const finish = (o: Omit<Outcome, "modelCalls" | "usage" | "reportedUsage" | "strategy" | "calls"> & { calls: ValidCall[] }): Outcome => {
     const calls = o.calls.map((c) => ({ ...c, id: newCallId() }));
-    const out: Outcome = { ...o, calls, modelCalls, usage, strategy: tools.length ? adapter.name : "plain" };
+    const reportedUsage = contextUsage(last, usage, trimmedTokens, o.text.length + calls.reduce((n, c) => n + c.argsJson.length, 0));
+    const out: Outcome = { ...o, calls, modelCalls, usage, reportedUsage, strategy: tools.length ? adapter.name : "plain" };
     logger.event(session, "response", {
       req: reqId,
       finish: out.finish,
@@ -172,14 +209,15 @@ export async function runChat(req: ChatRequest, ctx: RunContext): Promise<Outcom
       modelCalls,
       ms: Date.now() - t0,
       usage,
+      reportedUsage: reportedUsage?.prompt_tokens !== usage?.prompt_tokens ? reportedUsage : undefined,
       costUSD: costUSD(usage, profile),
       strategy: out.strategy,
     });
     return out;
   };
-  const stop = (reason: string, kind: string): Outcome => {
+  const stop = (reason: string, kind: string, overflow?: string): Outcome => {
     logger.event(session, "guard_stop", { req: reqId, kind, reason });
-    return finish({ finish: "stop", calls: [], text: diagnostic(reason), diagnostic: kind });
+    return finish({ finish: "stop", calls: [], text: diagnostic(reason), diagnostic: kind, overflow });
   };
 
   // ---- turn-level guards (bounded execution) ----
@@ -206,6 +244,7 @@ export async function runChat(req: ChatRequest, ctx: RunContext): Promise<Outcom
   // count, so keep the history within the provider window (oldest results first).
   const reserve = maxTokens + Math.ceil(JSON.stringify(shownTools).length / 3.2) + 1500;
   const fitted = fitContext(messages, Math.max(4000, profile.contextWindow - reserve));
+  trimmedTokens = fitted.before - fitted.after;
   if (fitted.trimmed) {
     const cuts = fitted.cuts.map(({ role, chars, kept }) => ({ role, chars, kept }));
     logger.event(session, "context_trimmed", { req: reqId, trimmed: fitted.trimmed, estTokens: [fitted.before, fitted.after], window: profile.contextWindow, cuts: cuts.length ? cuts : undefined });
@@ -301,7 +340,13 @@ export async function runChat(req: ChatRequest, ctx: RunContext): Promise<Outcom
             : err.kind === "timeout"
               ? " The provider did not respond in time; limits can be raised in gpt-oss-proxy.config.json (limits.requestTimeoutMs, firstByteTimeoutMs, idleTimeoutMs)."
               : "";
-      return stop(`Model provider "${profile.name}" failed after ${err.attempts} attempt(s): ${err.message}.${hint}`, `upstream_${err.kind}`);
+      // An overflow goes to OpenCode as an error it compacts the session on (server.ts); the text
+      // is the fallback once the stream has started. Right after a compaction it would only make
+      // OpenCode compact and retry in a loop (observed), so the turn ends with the text instead.
+      const compacted = afterCompaction(messages) && !analysis.steps.length;
+      const overflow = err.kind === "context_length" && !compacted ? diagnostic(`context_length_exceeded: provider "${profile.name}" rejected the request as longer than the model's context window (${err.message})`) : undefined;
+      const why = err.kind === "context_length" && compacted ? ` The request still does not fit right after OpenCode compacted the conversation, so the provider's real context window is probably smaller than configured: check limit.context in opencode.json and ${envPrefix(profile)}_CONTEXT_WINDOW, or the provider's output limit (maxOutputTokens).` : hint;
+      return stop(`Model provider "${profile.name}" failed after ${err.attempts} attempt(s): ${err.message}.${why}`, `upstream_${err.kind}`, overflow);
     }
     if (profile.strategy === "auto" && adapter.name === "native" && tools.length) nativeSupport.set(profile.name, true);
     usage = addUsage(usage, result.usage);
@@ -310,7 +355,8 @@ export async function runChat(req: ChatRequest, ctx: RunContext): Promise<Outcom
     // provider reports how many prompt tokens it actually evaluated.
     const sentTokens = estimateTokens((body.messages as ChatMessage[]) ?? []) + (body.tools ? Math.ceil(JSON.stringify(body.tools).length / 3.2) : 0);
     const seen = result.usage?.prompt_tokens ?? 0;
-    if (seen > 0 && sentTokens > 3000 && seen < sentTokens * 0.6) {
+    last = { usage: result.usage, sentTokens, truncated: seen > 0 && sentTokens > 3000 && seen < sentTokens * 0.6 };
+    if (last.truncated) {
       logger.event(session, "context_truncated", { req: reqId, iteration, promptTokensSeen: seen, estimatedPromptTokens: sentTokens });
       if (!truncationWarned) {
         truncationWarned = true;

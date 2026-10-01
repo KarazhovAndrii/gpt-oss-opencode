@@ -146,9 +146,17 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse, c
     return;
   }
   if (ctrl.signal.aborted) return;
+  if (out.overflow && emitter.canSendStatus) {
+    // OpenCode compacts the session on an HTTP 400 context-overflow error and retries
+    // (verified with OpenCode 1.18; an error chunk inside a 200 stream does not do that).
+    emitter.fail(400, out.overflow, "invalid_request_error", "context_length_exceeded");
+    logger.event(session, "overflow_reported", { req: reqId });
+    logger.console(`[${new Date().toISOString().slice(11, 19)}] ${session.slice(-8)} ${profile.name} ${Date.now() - t0}ms -> HTTP 400 context_length_exceeded (OpenCode compacts)`);
+    return;
+  }
   if (out.text) emitter.content(out.text);
   if (out.calls.length) emitter.toolCalls(out.calls.map((c) => ({ id: c.id, name: c.name, argsJson: c.argsJson })));
-  emitter.finish(out.finish, out.usage);
+  emitter.finish(out.finish, out.reportedUsage);
 
   const cost = costUSD(out.usage, profile);
   const what = out.calls.length ? out.calls.map((c) => `${c.name}(${truncate(c.argsJson, 80)})`).join(", ") : out.diagnostic ? `DIAG ${out.diagnostic}` : `text ${out.text.length} chars`;

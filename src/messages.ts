@@ -49,12 +49,32 @@ export function lastUserIndex(messages: ChatMessage[]): number {
   return -1;
 }
 
+// OpenCode's own follow-up after it compacted a session (auto-continue, or a retry after a context
+// overflow error). The task then lives only in the summary: the first reply after OpenCode's
+// "What did we do so far?", possibly followed by the last answer it kept (OpenCode 1.18).
+const COMPACTION_FOLLOW_UP = /^(Continue if you have next steps|The previous request exceeded the provider's size limit)/;
+
+/** The last user message is OpenCode's own follow-up to a compaction it just did. */
+export function afterCompaction(messages: ChatMessage[]): boolean {
+  const i = lastUserIndex(messages);
+  return i >= 0 && COMPACTION_FOLLOW_UP.test(textOf(messages[i].content).trim());
+}
+
+function compactionSummary(messages: ChatMessage[], followUp: number): string {
+  let q = followUp - 1;
+  while (q >= 0 && messages[q].role !== "user") q--;
+  const summary = messages.slice(q + 1, followUp).find((m) => m.role === "assistant" && textOf(m.content).trim());
+  return summary ? textOf(summary.content).trim() : "";
+}
+
 export function currentObjective(messages: ChatMessage[], max = 1500): string {
   const i = lastUserIndex(messages);
   if (i < 0) return "";
   let t = textOf(messages[i].content)
     .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "")
     .trim();
+  const summary = COMPACTION_FOLLOW_UP.test(t) ? compactionSummary(messages, i) : "";
+  if (summary) t = `Continue the task described in this summary of the conversation so far:\n${summary}`;
   // Unwrap quoting some shells add around the whole prompt.
   if (/^"[\s\S]*"$/.test(t) && !t.slice(1, -1).includes('"')) t = t.slice(1, -1);
   // Long requests are often pasted data with the instruction before or after it: keep both ends.
