@@ -9,6 +9,10 @@ import { pathToFileURL } from "node:url";
 import type { ToolUse } from "./lib/opencode.ts";
 import { buildExe, cppSources, runExe } from "./lib/cxx.ts";
 import type { Fault } from "./lib/chaos.ts";
+import { findPython } from "./lib/python.ts";
+import { startBlackhole } from "./lib/blackhole.ts";
+import { CPP_HMI, generateCppHmi } from "./generators/cpp-hmi.ts";
+import { generateReportJson, REPORT_ITEMS } from "./generators/report-json.ts";
 import type { Limits } from "../src/config.ts";
 
 export interface CheckCtx {
@@ -39,6 +43,14 @@ export interface Scenario {
   modelLimit?: { context: number; output: number };
   chaos?: Record<number, Fault>;
   proxyLimits?: Partial<Limits>;
+  /** Adds generated files to the fresh repo copy (large inputs are generated, not committed). */
+  generate?(repo: string): void;
+  /** Tools OpenCode's shell must find: "python" puts a real interpreter first on its PATH. */
+  needs?: "python"[];
+  /** Extra environment for OpenCode (and the commands it runs). */
+  env?: Record<string, string>;
+  /** Local services for the run (started before OpenCode, closed after it); their env is added to OpenCode's. */
+  services?(): Promise<{ env: Record<string, string>; close(): Promise<void> }>;
   check(c: CheckCtx): Check[];
 }
 
@@ -93,6 +105,37 @@ function correlation(c: CheckCtx): Check {
 function unchanged(c: CheckCtx, rel: string | string[], name = `${rel} unchanged`): Check {
   const changed = [rel].flat().filter((r) => !c.fixtureDir || file(c.repo, r) !== fs.readFileSync(path.join(c.fixtureDir, r), "utf8"));
   return ok(name, changed.length === 0, `modified or deleted: ${changed.join(", ")}`);
+}
+
+/** For generated files (not in the fixture dir): unchanged since the harness's fixture commit. */
+function unchangedSinceCommit(c: CheckCtx, rel: string, name: string): Check {
+  const r = spawnSync("git", ["status", "--porcelain", "--", rel], { cwd: c.repo, encoding: "utf8" });
+  return ok(name, r.status === 0 && r.stdout.trim() === "", r.stdout.trim() || r.stderr);
+}
+
+const command = (t: ToolUse) => String(t.input?.command ?? "");
+
+/** Repo files (relative, forward slashes), without .git. */
+function repoFiles(repo: string): string[] {
+  const out: string[] = [];
+  const walk = (d: string) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      if (e.name === ".git" || e.name === "__pycache__") continue;
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) walk(full);
+      else out.push(path.relative(repo, full).replace(/\\/g, "/"));
+    }
+  };
+  walk(repo);
+  return out;
+}
+
+/** Arguments after `script` in a shell command, up to the first shell operator (quotes removed). */
+function scriptArgs(cmd: string, script: string): string[] {
+  const at = cmd.toLowerCase().indexOf(script.toLowerCase());
+  if (at < 0) return [];
+  const rest = cmd.slice(at + script.length).replace(/^["']/, "").split(/;|\|\||&&|\||>|\bif\b/)[0];
+  return [...rest.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map((m) => m[1] ?? m[2] ?? m[3]);
 }
 
 /** Compiles the repo's C++ library (src/) plus `extra` sources; output goes next to the repo, not into it. */
@@ -382,6 +425,105 @@ export const SCENARIOS: Scenario[] = [
         ok("tests/test_eval.cpp has >= 8 assertions covering ParseError and EvalError", nChecks >= 8 && /ParseError/.test(tests) && /EvalError/.test(tests), `${nChecks} CHECK*(...) found`),
         unchanged(c, frozen, "existing tests, framework, headers and build script unchanged"),
         ok("agent ran the test suite after its last edit", testsRanAfterLastEdit(c.tools, CPP_TEST_CMD)),
+        correlation(c),
+      ];
+    },
+  },
+  // ---- modelled on real user sessions (2026-10-01); synthetic fixtures, large inputs generated per run
+  {
+    id: "deps-install-hangs",
+    title: "The documented setup step never finishes: run the tests that can run and tell the user (real session: pip install hung)",
+    fixture: "py-setup-hang",
+    covers: ["hanging-command", "bounded-execution", "no-false-success", "python"],
+    needs: ["python"],
+    env: { PIP_DISABLE_PIP_VERSION_CHECK: "1", PYTHONDONTWRITEBYTECODE: "1" },
+    // pip (via tools/bootstrap.py or directly) uses a local index that never answers: the hang is
+    // not visible in any file, as with a real stuck mirror (a first version had a visible wait loop
+    // in bootstrap.py, and the model read it and skipped the step). No external network involved.
+    services: async () => {
+      const index = await startBlackhole();
+      return { env: { PIP_INDEX_URL: index.url, PIP_TIMEOUT: "900", PIP_RETRIES: "0" }, close: index.close };
+    },
+    // Room for the blocking step at the default 120 s plus one longer retry.
+    timeoutMs: 900_000,
+    turns: ["Set up the test environment and run the basic tests."],
+    check: (c) => {
+      const bash = c.tools.filter((t) => t.tool === "bash");
+      const setup = bash.filter((t) => /bootstrap|\bpip[\d.]*(\.exe)?\s+install\b/i.test(command(t)));
+      const tests = bash.find((t) => /unittest|pytest/.test(command(t)) && /\bRan ([6-9]|\d{2,}) tests?\b|\b([6-9]|\d{2,}) passed\b/.test(t.output));
+      const stops = c.proxy.filter((e) => e.type === "guard_stop");
+      const hang = /\b(hangs?|hung|hanging|stuck|stall(s|ed)?|never (finish|complete|return|end)|n[o']t (finish|complete|return|end)|time[sd]? ?out|timeout|block(s|ed|ing)|no response|indefinitely|forever|still running|does not proceed|no progress)/i;
+      // Added after a run wrote meter_protocol.py and fieldbus_sim.py itself and reported the integration tests as passing.
+      const fakes = repoFiles(c.repo).filter((f) => /(^|\/)(meter_protocol|fieldbus_sim)(\.py$|\/)/i.test(f));
+      return [
+        ok("ran the basic tests (at least the 6 basic tests executed)", !!tests, bash.map((t) => command(t)).join(" | ").slice(0, 600)),
+        ok("did not write stand-ins for the packages that could not be installed", fakes.length === 0, fakes.join(", ")),
+        ok("ran the hanging setup step (bootstrap or pip install) at most 3 times (first run + at most two reruns)", setup.length <= 3, `${setup.length} runs`),
+        ok("final answer says the setup step does not finish", hang.test(c.answer) && /bootstrap|setup|set-up|install|dependenc|requirements/i.test(c.answer), c.answer.slice(0, 400)),
+        ok("no proxy stop", stops.length === 0, stops.map((s) => `${s.kind}: ${String(s.reason).slice(0, 120)}`).join("; ")),
+        ok("non-empty final answer", c.answer.trim().length > 0),
+        correlation(c),
+      ];
+    },
+  },
+  {
+    id: "cpp-feature-search",
+    title: "Large C++ HMI tree (~300 files): trace the value on the speed gauge to its signal through two indirections",
+    fixture: "cpp-hmi",
+    covers: ["code-navigation", "large-repo", "targeted-inspection", "cpp", "misleading-names"],
+    generate: (repo) => generateCppHmi(repo),
+    timeoutMs: 600_000,
+    turns: ["Where does the speed shown on the speed gauge come from? Answer with file:line and the signal name."],
+    check: (c) => {
+      const lines = (file(c.repo, CPP_HMI.file) ?? "").split(/\r?\n/);
+      const at = lines.findIndex((l) => l.includes(CPP_HMI.marker)) + 1;
+      // "ClusterModel.cpp:22", "ClusterModel.cpp:22-24", "ClusterModel.cpp#L22", "ClusterModel.cpp (line 22)", "ClusterModel.cpp, lines 22–23"
+      const refs = [...c.answer.matchAll(/ClusterModel\.cpp[`*]*\s*(?::|#L|,?\s*\(?\s*(?:on\s+)?lines?\s+)(\d+)(?:\s*[-–]\s*(\d+))?/gi)].map((m) => [Number(m[1]), Number(m[2] ?? m[1])]);
+      return [
+        ok(`names ${CPP_HMI.file}:${at} (the subscription that feeds the gauge)`, at > 0 && refs.some(([a, b]) => a <= at + 1 && b >= at), `expected line ${at} or ${at + 1}; answer: ${c.answer.slice(0, 400)}`),
+        ok(`names the signal ${CPP_HMI.signal}`, c.answer.includes(CPP_HMI.signal), c.answer.slice(0, 400)),
+        unchangedSinceCommit(c, CPP_HMI.file, "source left unchanged"),
+        correlation(c),
+      ];
+    },
+  },
+  {
+    id: "large-data-converter",
+    title: "Convert a generated 4.4 MB JSON export to HTML with a script, without reading the file into the context (real session: 3.5 MB pasted)",
+    fixture: "report-export",
+    covers: ["large-data", "context-efficiency", "write", "python", "validation-after-change"],
+    generate: (repo) => generateReportJson(repo),
+    needs: ["python"],
+    timeoutMs: 600_000,
+    turns: ["Write a Python script that converts data/report.json to an HTML page with one <section> element per item, run it, and tell me where the output is."],
+    check: (c) => {
+      const scripts = repoFiles(c.repo).filter((f) => f.endsWith(".py"));
+      const runs = c.tools.filter((t) => t.tool === "bash" && t.status === "completed" && /\bpy(thon[\d.]*)?(\.exe)?\b/i.test(command(t)));
+      const ran = runs.findLast((t) => scripts.some((s) => command(t).toLowerCase().includes(path.basename(s).toLowerCase())));
+      const script = (ran && scripts.find((s) => command(ran).toLowerCase().includes(path.basename(s).toLowerCase()))) ?? scripts[0];
+      // Hidden check: run the agent's script again (same arguments) and count sections in the HTML it writes.
+      let hiddenDetail = "no script";
+      let sections = -1;
+      let produced: string | undefined;
+      const py = findPython();
+      if (script && py) {
+        const htmlBefore = new Map(repoFiles(c.repo).filter((f) => /\.html?$/i.test(f)).map((f) => [f, fs.statSync(path.join(c.repo, f)).mtimeMs]));
+        const args = ran ? scriptArgs(command(ran), path.basename(script)) : [];
+        const r = spawnSync(py, [script, ...args], { cwd: c.repo, encoding: "utf8", timeout: 120_000 });
+        const html = repoFiles(c.repo).filter((f) => /\.html?$/i.test(f) && fs.statSync(path.join(c.repo, f)).mtimeMs !== htmlBefore.get(f));
+        produced = html[0];
+        sections = produced ? (fs.readFileSync(path.join(c.repo, produced), "utf8").match(/<section\b/gi)?.length ?? 0) : -1;
+        hiddenDetail = `python ${[script, ...args].join(" ")} -> exit ${r.status}, html: ${html.join(", ") || "none written"}, sections: ${sections}${r.status ? `; ${(r.stderr || r.stdout).slice(-400)}` : ""}`;
+      } else if (!py) hiddenDetail = "no Python interpreter for the hidden check";
+      // Everything the agent pulled out of report.json through tools (reads, shell output, greps).
+      const big = c.tools.filter((t) => /report\.json/i.test(JSON.stringify(t.input ?? {})) && t.output.length > 20_000);
+      const named = [...c.answer.matchAll(/[\w.\-\\/:]+\.html?\b/gi)].map((m) => path.basename(m[0].replace(/\\/g, "/")).toLowerCase());
+      return [
+        ok("a Python script was written", scripts.length > 0),
+        ok("the agent ran its script", !!ran, runs.map((t) => command(t)).join(" | ").slice(0, 400)),
+        ok(`hidden check: the script writes HTML with ${REPORT_ITEMS} <section> elements`, sections === REPORT_ITEMS, hiddenDetail),
+        ok("answer names the output file", !!produced && named.includes(path.basename(produced).toLowerCase()), `${produced ?? "(no output)"} / answer: ${c.answer.slice(0, 300)}`),
+        ok("never read the whole file into its context (no tool result over 20K chars from report.json)", big.length === 0, big.map((t) => `${t.tool} ${JSON.stringify(t.input).slice(0, 120)} -> ${t.output.length} chars`).join("; ")),
         correlation(c),
       ];
     },

@@ -22,6 +22,7 @@ import { findOpenCode, isolatedHome, plainWindowsPath, runOpenCode, shellPath, t
 import { detectShell, type ShellKind } from "../src/shell.ts";
 import { readProxyEvents, proxyMetrics, validCallRate, type ProxyMetrics } from "./lib/metrics.ts";
 import { startChaos } from "./lib/chaos.ts";
+import { withPython } from "./lib/python.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
@@ -117,6 +118,7 @@ async function runScenario(sc: Scenario, n: number): Promise<ScenarioResult> {
   const repo = path.join(dir, "repo");
   const fixtureDir = path.join(ROOT, "eval", "fixtures", sc.fixture);
   copyDir(fixtureDir, repo);
+  sc.generate?.(repo);
   git(repo, "init", "-q");
   git(repo, "add", "-A");
   git(repo, "commit", "-qm", "fixture");
@@ -162,6 +164,10 @@ async function runScenario(sc: Scenario, n: number): Promise<ScenarioResult> {
   const home = isolatedHome(path.join(dir, "oc"), ocConfig, sharedCache);
   if (shellExe) home.env.SHELL = shellExe;
   if (shellPathEnv) home.env.PATH = shellPathEnv;
+  if (sc.needs?.includes("python")) home.env.PATH = withPython(home.env.PATH ?? process.env.PATH ?? "");
+  Object.assign(home.env, sc.env ?? {});
+  const services = sc.services ? await sc.services() : undefined;
+  Object.assign(home.env, services?.env ?? {});
   if (extraTools) {
     const toolDir = path.join(home.env.XDG_CONFIG_HOME, "opencode", "tool");
     copyDir(path.join(ROOT, "opencode", "tool"), toolDir);
@@ -194,6 +200,7 @@ async function runScenario(sc: Scenario, n: number): Promise<ScenarioResult> {
   server.closeAllConnections();
   await closed;
   await chaos?.close();
+  await services?.close();
 
   const proxy = readProxyEvents(cfg.logDir);
   let checks: Check[];
