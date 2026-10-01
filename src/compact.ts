@@ -16,8 +16,33 @@ const line = (desc: string, re: RegExp) =>
     ?.trim()
     .replace(/^-\s*/, "");
 
+// OpenCode's description when its shell is PowerShell (5.1 or 7+): a different shape from the bash
+// one, with a "# ... shell notes" block that must reach the model verbatim (5.1 has no &&). Left
+// whole it costs ~1,030 prompt tokens more per step than the compacted bash description (measured).
+function powershellBash(desc: string): string | undefined {
+  const first = desc.split(/\r?\n/)[0];
+  const ps51 = /Windows PowerShell \(5\.1\)/.test(first);
+  if (!ps51 && !/PowerShell \(7\+\)/.test(first)) return undefined;
+  const aware = line(desc, /^Be aware:/);
+  const notes = desc.match(/^# (Windows )?PowerShell \([^)]*\) shell notes\r?\n(- .*(\r?\n|$))+/m)?.[0].trim();
+  if (!aware || !notes) return undefined;
+  return [
+    `${first.replace(/ with optional timeout.*$/, "")} (${aware.replace(/^Be aware:\s*/, "")}). Commands run in the project directory; use the \`workdir\` parameter instead of changing directories in the command.`,
+    line(desc, /for temporary work outside the workspace/),
+    `Use it for tests, builds, git, package managers and scripts - NOT for reading, searching, writing or editing files: use read, grep, glob, write and edit for those. Quote paths that contain spaces.${ps51 ? "" : " Chain dependent commands with && on one line."}`,
+    notes,
+    line(desc, /optional timeout in milliseconds/i),
+    /will be truncated/.test(desc) ? "Very long output is truncated; the full output is saved to a file you can read or grep." : undefined,
+    "Only commit, amend, push or create PRs when explicitly asked; never force-push, skip hooks or change git config.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 const COMPACTORS: Record<string, Compactor> = {
   bash(desc) {
+    const ps = powershellBash(desc);
+    if (ps) return ps;
     const aware = line(desc, /^Be aware:/);
     if (!aware || !/persistent shell session/.test(desc)) return undefined;
     const env = aware.replace(/^Be aware:\s*/, "");

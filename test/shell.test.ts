@@ -164,9 +164,18 @@ test("the PowerShell 5.1 operating rule is added only for a Windows PowerShell 5
   for (const s of ["pwsh", "posix", undefined] as const) assert.doesNotMatch(rules(s), /PowerShell/, String(s));
 });
 
-test("compaction keeps OpenCode's PowerShell shell notes (never the bash advice to chain with &&)", () => {
+test("compaction shortens the PowerShell description but keeps OpenCode's shell notes (never the bash advice to chain with &&)", () => {
   const r = compactTools(withBash(PS51_DESCRIPTION));
+  assert.ok(r.compacted.includes("bash"), "the PowerShell shape is compacted too (it cost ~1,030 prompt tokens per step)");
   const bash = r.tools.find((t: any) => t.function.name === "bash")!.function.description!;
-  assert.match(bash, /cmd1; if \(\$\?\) \{ cmd2 \}/);
-  assert.doesNotMatch(bash, /Chain dependent commands with &&/);
+  assert.ok(bash.length < PS51_DESCRIPTION.length / 3, `${bash.length} chars`);
+  assert.match(bash, /^Executes a given Windows PowerShell \(5\.1\) command \(OS: win32, Shell: powershell\)/);
+  assert.equal(shellFromDescription(bash), "powershell");
+  assert.match(bash, /# Windows PowerShell \(5\.1\) shell notes\n- Use `cmd1; if \(\$\?\) \{ cmd2 \}` to chain dependent commands\./);
+  assert.match(bash, /AppData\\Local\\Temp\\opencode` for temporary work/);
+  assert.doesNotMatch(bash, /&&/);
+  const pwsh = PS51_DESCRIPTION.replace("Windows PowerShell (5.1) command", "PowerShell (7+) command").replace("# Windows PowerShell (5.1) shell notes", "# PowerShell (7+) shell notes");
+  const p7 = compactTools(withBash(pwsh)).tools.find((t: any) => t.function.name === "bash")!.function.description!;
+  assert.match(p7, /Chain dependent commands with && on one line/);
+  assert.match(p7, /# PowerShell \(7\+\) shell notes/);
 });
