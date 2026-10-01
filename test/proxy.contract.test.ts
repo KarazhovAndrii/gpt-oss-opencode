@@ -416,4 +416,36 @@ describe("context guard", () => {
       await up.close();
     }
   });
+
+  test("a pasted document larger than the window is cut to both ends (not forwarded whole), and the user is told once", async () => {
+    // Real session: ~3.5M chars of JSON pasted with "write a Python converter to HTML" went to an
+    // Ollama with num_ctx 32768, which kept only the tail: no tools, no instruction, wrong task.
+    const up = await startMockUpstream();
+    const px = await startProxy(up.url, { contextWindow: 32_768, maxOutputTokens: 8192 });
+    try {
+      const paste = `Write a Python converter from this JSON to HTML.\n${JSON.stringify({ issues: Array.from({ length: 12_000 }, (_, i) => ({ key: `DICHMI-${i}`, summary: "s".repeat(250) })) })}\nOne section per issue.`;
+      const first = [{ role: "system", content: systemPrompt() }, { role: "user", content: [{ type: "text", text: paste }] }];
+      up.push(harmonyFinal("Here is the converter."));
+      const r1 = await chat(px.url, base({ messages: first }));
+      assert.equal(sseText(r1.events), "Here is the converter.");
+      const sent = JSON.stringify(up.requests[0].messages);
+      assert.ok(sent.length < 32_768 * 3.2, `sent ${sent.length} chars`);
+      assert.match(sent, /Write a Python converter from this JSON to HTML\./);
+      assert.match(sent, /One section per issue\./);
+      const reasoning = (events: any[]) => events.map((e) => e.choices?.[0]?.delta?.reasoning_content ?? "").join("");
+      assert.match(reasoning(r1.events), /your message is about \d+ tokens, more than fits in the model's context window \(32768 tokens\).*save it to a file/);
+      const trimmed = px.events().find((e) => e.type === "context_trimmed");
+      assert.deepEqual(trimmed.cuts.map((c: any) => [c.role, c.chars]), [["user", paste.length]]);
+
+      // Next turn: the paste is still in OpenCode's history; still cut, but no repeated notice.
+      up.push(harmonyFinal("Done."));
+      const r2 = await chat(px.url, base({ messages: [...first, { role: "assistant", content: "Here is the converter." }, { role: "user", content: "Add a table of contents." }] }));
+      assert.ok(JSON.stringify(up.requests[1].messages).length < 32_768 * 3.2);
+      assert.match(JSON.stringify(up.requests[1].messages), /Add a table of contents\./);
+      assert.doesNotMatch(reasoning(r2.events), /your message is about/);
+    } finally {
+      await px.close();
+      await up.close();
+    }
+  });
 });

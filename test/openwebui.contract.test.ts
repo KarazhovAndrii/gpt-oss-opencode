@@ -181,10 +181,22 @@ describe("OpenWebUI profile", () => {
     const px = await proxy();
     try {
       const r = await chat(px.url, base());
-      assert.ok(r.events.some((e) => /evaluated only 1026 of ~\d+ prompt tokens/.test(e.choices?.[0]?.delta?.reasoning_content ?? "")));
+      const warning = r.events.map((e) => e.choices?.[0]?.delta?.reasoning_content ?? "").join("");
+      assert.match(warning, /evaluated only 1026 of ~\d+ prompt tokens - its context window is smaller than the 131072 tokens profile "openwebui" assumes/);
+      assert.match(warning, /raise num_ctx .* to at least 131072, or set OPENWEBUI_CONTEXT_WINDOW \(contextWindow\) to the server's real context length/);
       assert.ok(px.events().some((e) => e.type === "context_truncated" && e.promptTokensSeen === 1026));
     } finally {
       await px.close();
     }
+  });
+
+  test("truncation advice does not ask for a context the server already has", async () => {
+    const { truncationAdvice } = await import("../src/agent.ts");
+    const p = { name: "openwebui", kind: "openwebui", contextWindow: 32768 } as any;
+    // The reported case: num_ctx 32768 already, the request itself was ~1.08M tokens.
+    assert.match(truncationAdvice(p, 32770), /the request is larger than the context window \(32768 tokens\)/);
+    assert.doesNotMatch(truncationAdvice(p, 32770), /raise num_ctx/);
+    assert.match(truncationAdvice(p, 4096), /raise num_ctx .* to at least 32768/);
+    assert.match(truncationAdvice({ name: "custom", contextWindow: 65536 } as any, 8000), /raise the model server's context length to at least 65536, or set CUSTOM_CONTEXT_WINDOW/);
   });
 });

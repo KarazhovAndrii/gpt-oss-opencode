@@ -37,7 +37,10 @@ export function analyze(ev: any[]) {
   }
   const trunc = ev.filter((e) => e.type === "context_truncated");
   if (trunc.length)
-    flags.push({ severity: "high", message: `${trunc.length} request(s) were truncated by the model server (it evaluated ${Math.min(...trunc.map((t) => t.promptTokensSeen))} of ~${Math.max(...trunc.map((t) => t.estimatedPromptTokens))} prompt tokens): raise its context length (Ollama: OLLAMA_CONTEXT_LENGTH / num_ctx >= 32768)` });
+    flags.push({ severity: "high", message: `${trunc.length} request(s) were truncated by the model server (it evaluated ${Math.min(...trunc.map((t) => t.promptTokensSeen))} of ~${Math.max(...trunc.map((t) => t.estimatedPromptTokens))} prompt tokens): its context window is smaller than the profile's contextWindow - raise the server's (Ollama: OLLAMA_CONTEXT_LENGTH / num_ctx) or lower contextWindow to match it` });
+  const userCuts = ev.filter((e) => e.type === "context_trimmed").flatMap((e) => (e.cuts ?? []).filter((c: any) => c.role === "user"));
+  if (userCuts.length)
+    flags.push({ severity: "medium", message: `a user message of ${Math.max(...userCuts.map((c: any) => c.chars))} chars did not fit the context window and the model saw only its beginning and end (${userCuts.length} request(s)); large data belongs in a file the agent reads in parts` });
   const internal = ev.filter((e) => e.type === "internal_error");
   if (internal.length) flags.push({ severity: "high", message: `${internal.length} internal proxy error(s): ${String(internal[0].error).split("\n")[0].slice(0, 160)}` });
   const empties = ev.filter((e) => e.type === "empty_output");
@@ -126,6 +129,9 @@ export function timeline(ev: any[]): string[] {
         break;
       case "route":
         lines.push(`${t}    route ${e.route} (owned_by ${e.ownedBy ?? "?"})${e.note ? ` - ${e.note}` : ""}`);
+        break;
+      case "context_trimmed":
+        lines.push(`${t}    ✂ context trimmed by the proxy: ~${e.estTokens?.[0]} → ~${e.estTokens?.[1]} tokens (window ${e.window})${e.cuts?.length ? `; cut ${e.cuts.map((c: any) => `${c.role} ${c.chars}→${c.kept} chars`).join(", ")}` : ""}`);
         break;
       case "context_truncated":
         lines.push(`${t}    ! context truncated by the server: ${e.promptTokensSeen} of ~${e.estimatedPromptTokens} prompt tokens evaluated`);

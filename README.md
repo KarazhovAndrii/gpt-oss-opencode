@@ -322,7 +322,9 @@ For each step of a task, the proxy:
   with backoff, and rate limits have their own budget. If a budget runs out, OpenCode shows
   a `[gpt-oss-proxy] …` message saying what failed and what to change.
 - **Protects the context window.** Oversized histories are trimmed (oldest tool results
-  first), and it warns when a server silently cut the conversation.
+  first). A pasted document too large for the window is cut to its beginning and end, and
+  OpenCode tells you to put it in a file instead. The proxy also warns when a server
+  silently cut the conversation.
 - **Keeps a diagnostic log** per session (see [Security, privacy and logs](#security-privacy-and-logs)).
 
 The reasoning behind this design, with the measurements that drove it, is in

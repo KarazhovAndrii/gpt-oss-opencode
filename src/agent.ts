@@ -5,8 +5,9 @@
 
 import crypto from "node:crypto";
 import type { Config, Profile } from "./config.ts";
+import { envPrefix } from "./config.ts";
 import type { ChatMessage } from "./messages.ts";
-import { currentObjective, estimateTokens, findWorkingDirectory, fitContext, normalizeHistory, textOf } from "./messages.ts";
+import { currentObjective, estimateTokens, findWorkingDirectory, fitContext, lastUserIndex, normalizeHistory, textOf } from "./messages.ts";
 import { resolveTarget } from "./openwebui.ts";
 import type { ToolDef } from "./harmony.ts";
 import { interpretHarmony, stripHarmonyTokens } from "./harmony.ts";
@@ -70,6 +71,19 @@ export interface RunContext {
 
 function diagnostic(message: string): string {
   return `[gpt-oss-proxy] ${message}`;
+}
+
+/** What to do when the model server evaluated far fewer prompt tokens than were sent. */
+export function truncationAdvice(profile: Profile, seen: number): string {
+  const window = profile.contextWindow;
+  // The server already provides the configured window: the request itself did not fit.
+  if (seen >= window * 0.9)
+    return `the request is larger than the context window (${window} tokens) even after the proxy shortened the conversation. Start a new session, or put large content in a file instead of the message.`;
+  const raise =
+    profile.kind === "openwebui"
+      ? `raise num_ctx (Ollama OLLAMA_CONTEXT_LENGTH, the model's num_ctx, or profile "numCtx" on the /api route) to at least ${window}`
+      : `raise the model server's context length to at least ${window}`;
+  return `its context window is smaller than the ${window} tokens profile "${profile.name}" assumes, so instructions, tools or earlier results were cut. Either ${raise}, or set ${envPrefix(profile)}_CONTEXT_WINDOW (contextWindow) to the server's real context length so the proxy shortens the conversation to fit.`;
 }
 
 /** Logs the tool results OpenCode sent back for the previous step(s). */
@@ -192,7 +206,17 @@ export async function runChat(req: ChatRequest, ctx: RunContext): Promise<Outcom
   // count, so keep the history within the provider window (oldest results first).
   const reserve = maxTokens + Math.ceil(JSON.stringify(shownTools).length / 3.2) + 1500;
   const fitted = fitContext(messages, Math.max(4000, profile.contextWindow - reserve));
-  if (fitted.trimmed) logger.event(session, "context_trimmed", { req: reqId, trimmed: fitted.trimmed, estTokens: [fitted.before, fitted.after], window: profile.contextWindow });
+  if (fitted.trimmed) {
+    const cuts = fitted.cuts.map(({ role, chars, kept }) => ({ role, chars, kept }));
+    logger.event(session, "context_trimmed", { req: reqId, trimmed: fitted.trimmed, estTokens: [fitted.before, fitted.after], window: profile.contextWindow, cuts: cuts.length ? cuts : undefined });
+    // The user's own message did not fit: say so once per turn (it stays cut on every later step).
+    const own = fitted.cuts.find((c) => c.index === lastUserIndex(messages));
+    if (own && !analysis.steps.length) {
+      emitter.reasoning(
+        `\n${diagnostic(`your message is about ${Math.ceil(own.chars / 3.2)} tokens, more than fits in the model's context window (${profile.contextWindow} tokens), so the model sees only its first and last ${own.kept / 2} characters. For large data, save it to a file in the project and give the agent the path instead of pasting it, so it can read the parts it needs.`)}\n`,
+      );
+    }
+  }
   const history = fitted.messages;
 
   // Backend-specific endpoint and payload adjustments (OpenWebUI route selection).
@@ -290,9 +314,7 @@ export async function runChat(req: ChatRequest, ctx: RunContext): Promise<Outcom
       logger.event(session, "context_truncated", { req: reqId, iteration, promptTokensSeen: seen, estimatedPromptTokens: sentTokens });
       if (!truncationWarned) {
         truncationWarned = true;
-        emitter.reasoning(
-          `\n[gpt-oss-proxy] the model server evaluated only ${seen} of ~${sentTokens} prompt tokens - its context window is too small, so instructions, tools or earlier results were cut. ${profile.kind === "openwebui" ? `Raise num_ctx (Ollama OLLAMA_CONTEXT_LENGTH, the model's num_ctx, or profile "numCtx" on the /api route) to at least 32768.` : "Raise the model's context length."}\n`,
-        );
+        emitter.reasoning(`\n${diagnostic(`the model server evaluated only ${seen} of ~${sentTokens} prompt tokens - ${truncationAdvice(profile, seen)}`)}\n`);
       }
     }
 

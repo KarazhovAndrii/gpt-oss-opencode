@@ -110,7 +110,12 @@ Verified from OpenWebUI 0.11.4 / Ollama 0.34.4 source and live against both:
 2. **Turn guards** (from the history OpenCode sends, no extra state): step budget,
    repeated identical calls executed, consecutive tool failures → actionable diagnostic instead of looping.
 3. **Context guard**: the proxy adds ~4K tokens OpenCode does not count; if the
-   estimate nears the window, the oldest tool results are stubbed (logged).
+   estimate nears the window, a user message or reply larger than half the budget is cut
+   to head+tail, then the oldest tool results are stubbed, then the largest message is cut
+   to head+tail (all logged). Pasted documents need the first step: one message can exceed
+   the whole window, and Ollama then keeps only the tail of the prompt (observed: ~1.08M
+   tokens of pasted JSON sent to `num_ctx` 32768 lost the system prompt, tools and request;
+   on later turns Ollama dropped the message entirely).
 4. Build the upstream request via the strategy adapter: OpenCode's system prompt
    + short operating rules + the current user objective (verbatim) + tools.
 5. Call the model with bounded transport retries and a separate rate-limit budget

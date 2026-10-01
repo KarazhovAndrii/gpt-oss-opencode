@@ -57,7 +57,8 @@ export function currentObjective(messages: ChatMessage[], max = 1500): string {
     .trim();
   // Unwrap quoting some shells add around the whole prompt.
   if (/^"[\s\S]*"$/.test(t) && !t.slice(1, -1).includes('"')) t = t.slice(1, -1);
-  return t.length > max ? `${t.slice(0, max)}…` : t;
+  // Long requests are often pasted data with the instruction before or after it: keep both ends.
+  return t.length > max ? `${t.slice(0, max / 2)}\n…\n${t.slice(-max / 2)}` : t;
 }
 
 /**
@@ -102,6 +103,8 @@ export function normalizeHistory(messages: ChatMessage[]): ChatMessage[] {
   return out;
 }
 
+const CHARS_PER_TOKEN = 3.2;
+
 /** Rough token estimate for budget decisions (no tokenizer dependency). */
 export function estimateTokens(messages: ChatMessage[]): number {
   let chars = 0;
@@ -109,7 +112,17 @@ export function estimateTokens(messages: ChatMessage[]): number {
     chars += textOf(m.content).length + 16;
     for (const tc of m.tool_calls ?? []) chars += tc.function.name.length + tc.function.arguments.length + 16;
   }
-  return Math.ceil(chars / 3.2);
+  return Math.ceil(chars / CHARS_PER_TOKEN);
+}
+
+/** A message shortened to its beginning and end. */
+export interface Cut {
+  index: number;
+  role: ChatMessage["role"];
+  /** Original length in characters. */
+  chars: number;
+  /** Characters kept (half from the start, half from the end). */
+  kept: number;
 }
 
 export interface FitResult {
@@ -117,22 +130,48 @@ export interface FitResult {
   trimmed: number;
   before: number;
   after: number;
+  cuts: Cut[];
+}
+
+function omissionNote(role: ChatMessage["role"], omitted: number): string {
+  if (role === "user")
+    return `${omitted} characters of this message omitted by gpt-oss-proxy: the message is larger than the model's context window, so only its beginning and end are shown. Do not guess the omitted part; if the task needs it, ask the user to save the content to a file in the workspace so it can be read in parts`;
+  if (role === "tool") return `${omitted} chars omitted by gpt-oss-proxy to fit the context window`;
+  return `${omitted} characters of this earlier reply omitted by gpt-oss-proxy to fit the context window`;
 }
 
 /**
- * Safety net for context overflow: if the history exceeds `budget` tokens, the
- * oldest tool results (never the two most recent) are replaced by a stub, then
- * the largest remaining result is cut to head+tail. OpenCode's own compaction
- * normally triggers first; this only prevents hard provider errors.
+ * Safety net for context overflow: if the history exceeds `budget` tokens, a pasted
+ * document or reply larger than half the budget is cut to head+tail first (it cannot be
+ * fetched again, but it must not crowd out everything else), then the oldest tool
+ * results (never the two most recent) are replaced by a stub, then the largest remaining
+ * message is cut to head+tail. OpenCode's own compaction normally triggers first; this
+ * prevents provider errors and silent truncation by the model server.
  */
 export function fitContext(messages: ChatMessage[], budget: number): FitResult {
   const before = estimateTokens(messages);
-  if (before <= budget) return { messages, trimmed: 0, before, after: before };
+  if (before <= budget) return { messages, trimmed: 0, before, after: before, cuts: [] };
   const out = messages.map((m) => ({ ...m }));
   const toolIdx = out.map((m, i) => (m.role === "tool" ? i : -1)).filter((i) => i >= 0);
   const protectedIdx = new Set(toolIdx.slice(-2));
+  const cuts = new Map<number, Cut & { text: string }>();
   let trimmed = 0;
   let est = before;
+  // Cuts always start from the original text, so a second cut of the same message reports the true omission.
+  const cut = (i: number, keep: number) => {
+    const c = cuts.get(i) ?? { index: i, role: out[i].role, chars: 0, kept: 0, text: textOf(out[i].content) };
+    const half = Math.floor(keep / 2);
+    c.chars = c.text.length;
+    c.kept = 2 * half;
+    out[i].content = `${c.text.slice(0, half)}\n[… ${omissionNote(c.role, c.text.length - 2 * half)} …]\n${c.text.slice(-half)}`;
+    cuts.set(i, c);
+    trimmed++;
+    est = estimateTokens(out);
+  };
+  const cap = Math.floor((budget * CHARS_PER_TOKEN) / 2);
+  for (let i = 0; i < out.length; i++) {
+    if ((out[i].role === "user" || out[i].role === "assistant") && textOf(out[i].content).length > cap) cut(i, cap);
+  }
   for (const i of toolIdx) {
     if (est <= budget) break;
     if (protectedIdx.has(i)) continue;
@@ -144,16 +183,20 @@ export function fitContext(messages: ChatMessage[], budget: number): FitResult {
   }
   while (est > budget) {
     let big = -1;
-    for (let i = 0; i < out.length; i++) if (out[i].role === "tool" && (big < 0 || textOf(out[i].content).length > textOf(out[big].content).length)) big = i;
-    if (big < 0) break;
-    const t = textOf(out[big].content);
-    if (t.length < 4000) break;
-    const keep = Math.max(1000, Math.floor(t.length / 4));
-    out[big].content = `${t.slice(0, keep)}\n[… ${t.length - 2 * keep} chars omitted by gpt-oss-proxy to fit the context window …]\n${t.slice(-keep)}`;
-    trimmed++;
-    est = estimateTokens(out);
+    let bigLen = 0;
+    for (let i = 0; i < out.length; i++) {
+      if (out[i].role === "system" || out[i].role === "developer") continue;
+      const len = textOf(out[i].content).length;
+      if (len > bigLen) [big, bigLen] = [i, len];
+    }
+    if (big < 0 || bigLen < 4000) break;
+    // Remove just the excess (plus room for the omission note), keeping at least 1000 chars at each end.
+    const keep = Math.max(2000, bigLen - Math.ceil((est - budget) * CHARS_PER_TOKEN) - 600);
+    const prev = cuts.get(big);
+    if (prev && keep >= prev.kept) break;
+    cut(big, keep);
   }
-  return { messages: out, trimmed, before, after: est };
+  return { messages: out, trimmed, before, after: est, cuts: [...cuts.values()].map(({ text, ...c }) => c) };
 }
 
 function sanitizeCall(tc: ToolCallMsg): ToolCallMsg {

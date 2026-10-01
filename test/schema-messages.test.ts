@@ -97,3 +97,43 @@ test("fitContext trims the oldest large tool results first and protects the late
   assert.equal(fitContext(msgs, 1e9).trimmed, 0);
   assert.ok(estimateTokens(msgs) > 40_000);
 });
+
+test("fitContext cuts a pasted document larger than the window to its beginning and end, sparing tool results", async () => {
+  const { fitContext } = await import("../src/messages.ts");
+  // ~1.1M tokens of JSON pasted into the prompt (a real session: Ollama then kept only its tail).
+  const paste = `Write a Python script that converts this JSON to HTML:\n${JSON.stringify({ issues: Array.from({ length: 12_000 }, (_, i) => ({ key: `DICHMI-${i}`, summary: "x".repeat(250) })) })}\nKeep each field labeled.`;
+  const result = "1: import json\n".repeat(400);
+  const msgs: any[] = [
+    { role: "system", content: "sys" },
+    { role: "user", content: [{ type: "text", text: paste }] },
+    { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "read", arguments: "{}" } }] },
+    { role: "tool", tool_call_id: "c1", content: result },
+  ];
+  const r = fitContext(msgs, 19_000);
+  assert.ok(r.before > 1_000_000 && r.after <= 19_000, `${r.before} -> ${r.after}`);
+  const user = String(r.messages[1].content);
+  assert.ok(user.startsWith("Write a Python script that converts this JSON to HTML:"), "instruction before the paste kept");
+  assert.ok(user.endsWith("Keep each field labeled."), "instruction after the paste kept");
+  assert.match(user, /\[… \d+ characters of this message omitted by gpt-oss-proxy: the message is larger than the model's context window/);
+  assert.equal(r.messages[3].content, result, "the tool result is not sacrificed for the paste");
+  assert.deepEqual(r.cuts.map((c) => [c.index, c.role, c.chars]), [[1, "user", paste.length]]);
+  assert.ok(r.cuts[0].kept > 20_000, `kept ${r.cuts[0].kept} chars`);
+});
+
+test("fitContext reports the true omission when a message is cut twice", async () => {
+  const { fitContext } = await import("../src/messages.ts");
+  const msgs: any[] = [{ role: "system", content: "s".repeat(30_000) }, { role: "user", content: `A${"x".repeat(200_000)}Z` }];
+  const r = fitContext(msgs, 12_000);
+  assert.ok(r.after <= 12_000, `${r.after}`);
+  const user = String(r.messages[1].content);
+  const omitted = Number(user.match(/\[… (\d+) characters/)?.[1]);
+  assert.equal(omitted, 200_002 - r.cuts[0].kept);
+  assert.equal((user.match(/omitted by gpt-oss-proxy/g) ?? []).length, 1, "one omission note, not nested ones");
+});
+
+test("currentObjective keeps both ends of a long request", () => {
+  const t = `Convert this:\n${"y".repeat(5000)}\nto an HTML table.`;
+  const o = currentObjective([{ role: "user", content: t }]);
+  assert.ok(o.startsWith("Convert this:") && o.endsWith("to an HTML table."), o.slice(0, 40));
+  assert.ok(o.length < 1600);
+});
