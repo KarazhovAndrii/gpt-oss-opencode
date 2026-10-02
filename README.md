@@ -317,6 +317,12 @@ For each step of a task, the proxy:
   abbreviated. File contents are never rewritten.
 - **Re-asks instead of failing:** an invalid call goes back to the model with the exact error
   (up to 2 times), and so does a reply that is only half a tool call.
+- **Knows your shell.** OpenCode's `bash` tool runs Windows PowerShell 5.1 on many Windows
+  machines, where gpt-oss tends to write bash or cmd.exe commands (`&&`, `dir /s /b`, `grep`,
+  `rm -rf`). The proxy reads the shell from OpenCode's tool description, adds one PowerShell
+  rule to the model's instructions, and sends such a command back with the reason and a
+  working form before it runs (up to 2 times per step; then it runs as written). Bash and
+  PowerShell 7 are left alone.
 - **Guards against loops.** An identical call with nothing changed since is answered with the
   earlier result instead of running again. A polling loop that already timed out is not run
   again with a longer timeout. Long failure streaks and runaway turns stop with an
@@ -366,7 +372,7 @@ often the model itself makes mistakes, and in the hardware they need.
 
 | | gpt-oss-20b | gpt-oss-120b |
 |---|---|---|
-| **Verified here** | Full live evaluation: four runs of 16 scenarios, a Linux run, and the C++ task | Provider check, and an end-to-end tool round trip through the proxy (find files, read, edit, run the tests, answer). The full evaluation has not been run yet. |
+| **Verified here** | Full live evaluation: runs of 16–19 scenarios with Git Bash and with Windows PowerShell 5.1, a Linux run, and the C++ task | Provider check, and an end-to-end tool round trip through the proxy (find files, read, edit, run the tests, answer). The full evaluation has not been run yet. |
 | **Integration problems** (tool calling rejected by the provider, gateway payload losses, OpenCode prompt selection) | Present; solved by the proxy | The same. SiliconFlow rejects native tool calls for 120b just as for 20b, and the proxy's emulation works unchanged. |
 | **Model mistakes** (malformed calls, mistyped paths, loops, misread specs) | Measured; see [What to expect](#what-to-expect) | Expected to be less frequent, since 120b is the stronger model; not measured yet. The proxy's guards apply either way. |
 | **Self-hosting** | About 14 GB; a 16 GB GPU | About 65 GB; an 80 GB-class GPU |
@@ -380,8 +386,8 @@ are 20b prices. When you use 120b, set its prices there so the cost reports are 
 1. **A full tool round trip:** with the `CUSTOM_*` variables set, run `npm run test:live`.
    It plays OpenCode's role against your provider, through the proxy, on a small task:
    read, edit, run the tests, answer.
-2. **The live evaluation** (optional, about 30 minutes):
-   `npm run eval -- --profile custom --concurrency 1` runs the 16 scenarios behind the
+2. **The live evaluation** (optional, about an hour on a rate-limited provider):
+   `npm run eval -- --profile custom --concurrency 1` runs the 19 scenarios behind the
    numbers in the [validation report](docs/VALIDATION_REPORT.md).
 3. **What the proxy saw:** `npm run report -- --latest` shows which strategy was used. A
    `strategy_fallback` entry means the provider refused native tools and harmony emulation
@@ -690,16 +696,18 @@ has not been measured yet. Full results are in the
   OpenWebUI + Ollama with a small stand-in model. GPT-OSS behind OpenWebUI, and all other
   providers, are not verified yet: check them as described in
   [Checking a new provider](#checking-a-new-provider).
-- **Tested platforms:** Windows 11 and Linux (Ubuntu under WSL2); macOS is untested.
+- **Tested platforms:** Windows 11, with OpenCode running commands in Git Bash and in Windows
+  PowerShell 5.1, and Linux (Ubuntu under WSL2); macOS and PowerShell 7 are untested.
 
 ## Development
 
 ```bash
-npm test                 # 124 unit and contract tests; offline, uses the same AI SDK package as OpenCode
+npm test                 # 148 unit and contract tests; offline, uses the same AI SDK package as OpenCode
 npm run typecheck        # tsc --noEmit (TypeScript runs natively on Node; no build step)
 npm run test:live        # a real tool round trip for each configured provider (small cost)
-npm run eval -- --profile custom --concurrency 1    # live evaluation: real OpenCode + proxy + your provider, 16 scenarios
+npm run eval -- --profile custom --concurrency 1    # live evaluation: real OpenCode + proxy + your provider, 19 scenarios
 npm run eval -- --only feature-median --repeat 3    # selected scenarios, repeated (default profile: siliconflow)
+npm run eval -- --shell powershell --concurrency 1  # OpenCode's shell: bash (Git Bash), powershell (Windows PowerShell 5.1) or pwsh
 npm run recheck -- .eval-runs/<run>                 # re-judge a saved run with the current checks
 ```
 
@@ -708,7 +716,9 @@ The live evaluation runs real OpenCode on copies of the synthetic repositories i
 state and the executed tool calls. Results are written to `.eval-runs/<run>/`. It needs the
 OpenCode CLI (set `OPENCODE_BIN` to use a specific binary) and a configured provider
 (`--profile` picks it; the default, `siliconflow`, is the reference used in the validation
-report). The `cpp-evaluator` scenario also needs a C++ compiler (g++, clang++ or MSVC).
+report). The `cpp-evaluator` scenario also needs a C++ compiler (g++, clang++ or MSVC), and
+`deps-install-hangs` and `large-data-converter` need Python 3. `--shell powershell` runs
+OpenCode with Windows PowerShell 5.1 and the PATH of a plain Windows machine.
 
 For OpenWebUI work without a GPU server, `node scripts/owui-local-stack.mjs up` builds a real
 local OpenWebUI + Ollama stack in `.local-stack/`, with a small stand-in model.

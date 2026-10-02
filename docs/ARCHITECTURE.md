@@ -119,7 +119,11 @@ Verified from OpenWebUI 0.11.4 / Ollama 0.34.4 source and live against both:
    tokens of pasted JSON sent to `num_ctx` 32768 lost the system prompt, tools and request;
    on later turns Ollama dropped the message entirely).
 4. Build the upstream request via the strategy adapter: OpenCode's system prompt
-   + short operating rules + the current user objective (verbatim) + tools.
+   + short operating rules + the current user objective (verbatim) + tools. The shell behind
+   OpenCode's `bash` tool is read from that tool's description ("Executes a given Windows
+   PowerShell (5.1) command …"), never from the platform: a Windows host may run Git Bash,
+   pwsh 7 or Windows PowerShell 5.1. For 5.1 the rules get one more line (chain with
+   `cmd1; if ($?) { cmd2 }`, `$env:NAME`, `2>$null`, no grep/head/sed or cmd.exe switches).
 5. Call the model with bounded transport retries and a separate rate-limit budget
    (exponential backoff, `Retry-After`), all under a per-request time budget.
 6. Interpret: harmony parse (everything after the first call is discarded – it can
@@ -151,7 +155,16 @@ Verified from OpenWebUI 0.11.4 / Ollama 0.34.4 source and live against both:
    file name, and gpt-oss uses it as a name search (one session: 9 of 14 globs found nothing).
 8. **Repair** invalid calls by re-prompting with the exact error as a tool result
    (bounded, default 2); a bare-JSON reply right after a rejection is accepted as
-   that tool's arguments.
+   that tool's arguments. On a Windows PowerShell 5.1 host, a `bash` command that cannot
+   work there goes back unexecuted with the reason and a working form (`src/shell.ts`):
+   `&&`/`||`, `dir`/`del`/`rd`/`copy`/`move` with cmd.exe switches, `ls -la`, `rm -rf`,
+   `export X=`, `X=1 cmd`, `/dev/null` or `nul` redirections, heredocs (`<<`) and `<` input, Unix tools (grep, head, tail,
+   sed, awk, wc, which, touch, `find -name`) and `where x` (Where-Object, prints nothing).
+   Each was run in powershell.exe 5.1 the way OpenCode runs it (`-NoProfile -NonInteractive
+   -Command`) and fails there; quoted text, here-strings and hashtables are skipped, and forms
+   that happen to work (`ls -R`, `rm -r`, `findstr`, `where.exe`, `cmd /c "a && b"`) pass.
+   After `limits.shellReprompts` (2) re-prompts the command runs as written, so PowerShell's
+   own error reaches the model; the turn never stops over it. Commands are not rewritten.
 9. **Redundancy guard**: an identical call with nothing changed since (no successful
    edit/write, no other bash) is answered by the proxy with a hint containing the
    earlier result instead of being executed (bounded, default 2 hints; then passed through).
@@ -210,10 +223,11 @@ validation, bounded recovery and observability.
 | `src/messages.ts` | history normalization, context guard |
 | `src/upstream.ts` | provider client: SSE/JSON parsing, timeouts, retries, error classes |
 | `src/emitter.ts` | OpenAI SSE / JSON writer (+ keepalives) |
-| `src/compact.ts` | compaction of long built-in tool descriptions (default on) |
+| `src/compact.ts` | compaction of long built-in tool descriptions (default on; bash and PowerShell shapes of the `bash` tool, OpenCode's PowerShell shell notes kept verbatim) |
+| `src/shell.ts` | which shell runs OpenCode's `bash` tool; Windows PowerShell 5.1 command checks |
 | `src/openwebui.ts` | OpenWebUI route selection and payload fixes |
 | `src/log.ts`, `src/sessionreport.ts`, `bin/report.ts` | JSONL diagnostics (metadata only unless `logContent`; day folders pruned after `logRetentionDays`) and the session report tool |
 | `opencode/` | OpenCode config example, optional plugin, optional `repo_overview` tool |
-| `eval/` | live evaluation harness (`run.ts`), scenarios, synthetic fixture repos, `recheck.ts`/`compare.ts` |
+| `eval/` | live evaluation harness (`run.ts`; `--shell` picks bash, Windows PowerShell 5.1 or pwsh), scenarios, synthetic fixture repos, `generators/` for large inputs made per run, `recheck.ts`/`compare.ts` |
 | `scripts/` | provider probes, request replay, OpenWebUI wire probe, local OpenWebUI + Ollama stack |
 | `test/` | unit + contract tests (mock provider, AI SDK client) |
