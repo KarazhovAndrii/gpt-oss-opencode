@@ -92,6 +92,12 @@ You need **Node.js 22.18 or newer**, **OpenCode 1.18 or newer**, and access to
 server and an API key for it. Check the [provider requirements](#llm-provider-requirements)
 if you are unsure.
 
+Check Node.js with `node --version`. The proxy runs its TypeScript files directly, which
+older versions cannot do; the npm commands then stop and say what to install
+(`winget install OpenJS.NodeJS.LTS` on Windows, or the LTS from
+[nodejs.org](https://nodejs.org)). An "Unknown file extension .ts" error means a `.ts`
+file was started directly with an old Node.js.
+
 ```bash
 git clone https://github.com/KarazhovAndrii/gpt-oss-opencode.git
 cd gpt-oss-opencode
@@ -849,7 +855,7 @@ has not been measured yet. Full results are in the
 ## Development
 
 ```bash
-npm test                 # 168 unit and contract tests; offline, uses the same AI SDK package as OpenCode
+npm test                 # 169 unit and contract tests; offline, uses the same AI SDK package as OpenCode
 npm run typecheck        # tsc --noEmit (TypeScript runs natively on Node; no build step)
 npm run test:live        # a real tool round trip for each configured provider (small cost)
 npm run eval -- --profile custom --concurrency 1    # live evaluation: real OpenCode + proxy + your provider, 19 scenarios

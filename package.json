@@ -20,12 +20,12 @@
     "gpt-oss-setup": "bin/setup.ts"
   },
   "scripts": {
-    "start": "node bin/gpt-oss-proxy.ts",
-    "setup": "node bin/setup.ts",
-    "doctor": "node bin/setup.ts --doctor",
+    "start": "node bin/check-node.mjs && node bin/gpt-oss-proxy.ts",
+    "setup": "node bin/check-node.mjs && node bin/setup.ts",
+    "doctor": "node bin/check-node.mjs && node bin/setup.ts --doctor",
     "test": "node --test \"test/*.test.ts\"",
     "typecheck": "tsc --noEmit",
-    "report": "node bin/report.ts",
+    "report": "node bin/check-node.mjs && node bin/report.ts",
     "eval": "node eval/run.ts",
     "test:live": "node --test --test-concurrency=1 \"test/live/*.test.ts\"",
     "recheck": "node eval/recheck.ts",
