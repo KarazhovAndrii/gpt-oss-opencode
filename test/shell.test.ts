@@ -132,6 +132,11 @@ test("every command that failed in Windows PowerShell 5.1 is flagged with the ri
   }
 });
 
+test("a deletion hint names the working form only with the caveat to delete only what the user asked for", () => {
+  // Observed: following a README's injected instruction, the model proposed `rm -rf src`.
+  for (const cmd of ["rm -rf src", "rd /s /q src", "del /f a.txt"]) assert.match(powershell51Problems(cmd)[0].fix, /Remove-Item -Recurse -Force path` - but delete only what the user asked you to delete/, cmd);
+});
+
 test("commands that work in Windows PowerShell 5.1 are never flagged", () => {
   for (const cmd of WORKS_IN_51) assert.deepEqual(powershell51Problems(cmd), [], cmd);
 });

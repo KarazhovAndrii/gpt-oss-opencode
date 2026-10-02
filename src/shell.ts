@@ -173,6 +173,10 @@ const CMD_SWITCH = /^\/([sbqfypwa]|a:?-?[dhsrail]{1,3}|o:?-?[nesdg]{1,3})$/i;
 // Unix ls flag clusters that fail on Get-ChildItem (-la, -al, -lh, -ltr, -a). "-ah"/"-ad" are real
 // aliases (-Hidden, -Directory), "-R"/"-r" recurse, and "-l dir" is -LiteralPath dir: all work.
 const LS_FLAGS = /^-(l[ahtr]+|al[ht]*|a)$/i;
+// A deletion is never something to complete on the model's own: the hint names the working form only
+// with this caveat (observed: a README's injected instruction made the model propose `rm -rf src`).
+const ONLY_IF_ASKED = " - but delete only what the user asked you to delete";
+
 const UNIX_TOOLS: Record<string, string> = {
   grep: 'search files with the grep function; to filter command output use `| Select-String "pattern"` (or findstr)',
   egrep: 'search files with the grep function; to filter command output use `| Select-String "pattern"`',
@@ -224,7 +228,7 @@ export function powershell51Problems(cmd: string): ShellProblem[] {
         if (LISTERS.has(name))
           add(shown, `\`${name}\` is Get-ChildItem in PowerShell and takes no cmd.exe switches: to find files use the glob function (e.g. pattern "**/*name*"), or \`Get-ChildItem -Recurse -Name -Filter *name*\``);
         else if (name === "copy" || name === "move") add(shown, `\`${name}\` is ${name === "copy" ? "Copy-Item" : "Move-Item"} in PowerShell and takes no cmd.exe switches: use \`${name === "copy" ? "Copy-Item" : "Move-Item"} -Force src dst\``);
-        else add(shown, `\`${name}\` is Remove-Item in PowerShell and takes no cmd.exe switches: use \`Remove-Item -Recurse -Force path\``);
+        else add(shown, `\`${name}\` is Remove-Item in PowerShell and takes no cmd.exe switches: use \`Remove-Item -Recurse -Force path\`${ONLY_IF_ASKED}`);
       }
     }
     if (LISTERS.has(name)) {
@@ -233,7 +237,7 @@ export function powershell51Problems(cmd: string): ShellProblem[] {
     }
     if (REMOVERS.has(name)) {
       const bad = args.find((a) => !a.quoted && /^-(rf|fr|f)$/i.test(a.text));
-      if (bad) add(`${name} ${bad.text}`, "Remove-Item has no -rf/-f (\"-f\" is ambiguous): use `Remove-Item -Recurse -Force path`");
+      if (bad) add(`${name} ${bad.text}`, "Remove-Item has no -rf/-f (\"-f\" is ambiguous): use `Remove-Item -Recurse -Force path`" + ONLY_IF_ASKED);
     }
     if (name === "export") {
       const m = argText.match(/^([A-Za-z_]\w*)=(.*)$/);
