@@ -69,8 +69,9 @@ review (see [What to expect](#what-to-expect)).
 
 **At a glance:** works with any OpenAI-compatible provider (generic `custom` profile, plus
 tested presets for SiliconFlow and OpenWebUI) · gpt-oss-20b fully evaluated, gpt-oss-120b
-verified end to end ([model sizes](#model-sizes-20b-and-120b)) · Node.js ≥ 22.18, no
-runtime dependencies · MIT license.
+verified end to end ([model sizes](#model-sizes-20b-and-120b)) · set up in about a minute
+with `npm run setup` ([quick setup](#quick-setup)) · Node.js ≥ 22.18, no runtime
+dependencies · MIT license.
 
 **Contents:**
 [Why it's useful](#why-its-useful) ·
@@ -87,16 +88,118 @@ runtime dependencies · MIT license.
 ## Quick setup
 
 You need **Node.js 22.18 or newer**, **OpenCode 1.18 or newer**, and access to
-**gpt-oss-20b or gpt-oss-120b** through an OpenAI-compatible API. Check the
-[provider requirements](#llm-provider-requirements) if you are unsure.
-
-### 1. Start the proxy and point it at your provider
+**gpt-oss-20b or gpt-oss-120b** through an OpenAI-compatible API, for example an OpenWebUI
+server and an API key for it. Check the [provider requirements](#llm-provider-requirements)
+if you are unsure.
 
 ```bash
 git clone https://github.com/KarazhovAndrii/gpt-oss-opencode.git
 cd gpt-oss-opencode
-npm install                                   # dev tooling only; the proxy has no runtime dependencies
+npm run setup
+```
 
+No `npm install` and no environment variables are needed. Setup asks where the model comes
+from, the server's address, your API key (input is hidden), the model (picked from the
+server's own list) and, for a server you or your company run, the context size. Then it
+**sends a real task through the proxy** and saves the configuration only if a valid tool
+call comes back:
+
+```text
+$ npm run setup
+Where does your GPT-OSS model come from?
+    1) An OpenWebUI server (company or self-hosted)
+    ...
+  Choose 1, 2 or 3 [1]: 1
+  OpenWebUI address (the one you open in the browser, e.g. http://gpu-server:8080): http://gpu-server:8080
+  API key (OpenWebUI > Settings > Account > API keys; input is hidden): ***************
+  ok  connected: 7 models available to this key
+  ...
+Checking gpt-oss20b-opencode, context 65536 (requested per request)
+  ok  tool call works (2.4 s; route api, tool calls: native): the model called read {"filePath":"…/README.md"}
+
+Saving
+  ok  …/gpt-oss-opencode/gpt-oss-proxy.config.json (no secrets in it)
+  ok  …/gpt-oss-opencode/openwebui.key (your API key; git-ignored)
+  ok  ~/.config/opencode/opencode.json
+        plugin: file:///…/gpt-oss-opencode/opencode/plugin/gpt-oss-proxy.ts (OpenCode starts the proxy itself)
+        model: gpt-oss/openwebui
+        small_model: gpt-oss/openwebui
+
+Ready. In your project folder run: opencode
+```
+
+Then, in any project:
+
+```bash
+cd /path/to/your/project
+opencode                                     # interactive; GPT-OSS is preselected
+opencode run "Explain what this project does and where its entry point is."
+```
+
+OpenCode starts the proxy itself through the bundled plugin, so you don't need a second
+terminal. The plugin also tells OpenCode the context size you chose, so OpenCode compacts
+long conversations before they overflow.
+
+**What setup writes:**
+
+| File | Content |
+|---|---|
+| `gpt-oss-proxy.config.json` in this folder | address, model id, context; no secrets (git-ignored) |
+| `<provider>.key` in this folder, e.g. `openwebui.key` | your API key (git-ignored; file mode 600 on Linux and macOS) |
+| OpenCode's config: `~/.config/opencode/opencode.json`, or the `opencode.jsonc` you already have (on Windows under `%USERPROFILE%\.config\opencode\`) | the plugin, and `gpt-oss/<provider>` as the default model and title model. Your other settings and comments stay; a backup is saved next to it. If you already have another default model, setup asks before changing it |
+
+Run setup again at any time to change the server, key, model or context.
+
+### For teams: one command for everyone
+
+At the end, setup prints a command with your server, model and context, for example:
+
+```bash
+npm run setup -- --openwebui http://gpu-server:8080 --model gpt-oss20b-opencode --context 65536
+```
+
+Share it (in your wiki, or a chat message). A colleague runs it after cloning and is asked
+only for their own API key. For scripted installs, add `--key-file <file> --yes` and setup
+asks nothing.
+
+| Flag | Meaning |
+|---|---|
+| `--openwebui <address>` · `--url <address>` · `--siliconflow` | where the model comes from: an OpenWebUI server, any other OpenAI-compatible server, or SiliconFlow |
+| `--model <id>` | the model id on that server |
+| `--context <tokens>` | context window, e.g. `32768` or `64k` |
+| `--key-file <file>` | read the API key from a file instead of asking |
+| `--no-num-ctx` | OpenWebUI: the server already runs the model with this context (an admin set it), so don't request it with each call |
+| `--no-plugin` | don't let OpenCode start the proxy; you run `npm start` yourself |
+| `--no-opencode` | leave OpenCode's config alone |
+| `--no-check` | save without the test request |
+| `--yes` | ask nothing: use the flags, a saved key and defaults |
+
+### When something doesn't work: `npm run doctor`
+
+```bash
+npm run doctor
+```
+
+Doctor checks the setup the way OpenCode will use it, and changes nothing. It shows:
+
+- whether OpenCode loads the plugin, and whether the plugin file still exists (a moved
+  folder breaks it);
+- which config file, `.env` and environment variables are in effect;
+- whether the server is reachable, the key is accepted, and the model exists;
+- whether a real task gets a valid tool call back.
+
+Each problem comes with what to do about it. Inside OpenCode, problems appear as messages
+starting with `[gpt-oss-proxy]`: an unreadable config file, a provider that isn't set up
+yet, or a server that cuts the conversation.
+
+### Manual setup (without `npm run setup`)
+
+If you prefer to configure things by hand, or want to run the proxy in its own terminal and
+watch its output:
+
+**1. Start the proxy and point it at your provider.**
+
+```bash
 export CUSTOM_BASE_URL=https://your-provider.example/v1   # any OpenAI-compatible endpoint
 export CUSTOM_MODEL=openai/gpt-oss-20b                     # the model id your provider uses, e.g. openai/gpt-oss-120b
 export CUSTOM_API_KEY=sk-...                               # only if your provider needs a key
@@ -104,14 +207,18 @@ npm start
 ```
 
 On Windows PowerShell, set variables like this: `$env:CUSTOM_BASE_URL="https://..."`.
+Instead of exporting, you can put the same lines (`export` is optional) in a `.env` file in
+this folder; `npm start` and the plugin read it, and variables already set in your shell
+win. A [config file](#config-file) holds the same settings and more.
 
 The proxy prints where it listens and which providers are configured:
 
 ```
 gpt-oss-proxy listening on http://127.0.0.1:8787/v1
- * custom       https://your-provider.example/v1  model=openai/gpt-oss-20b  strategy=auto  key=present
-   siliconflow  https://api.siliconflow.com/v1  model=openai/gpt-oss-20b  strategy=harmony  key=none (SILICONFLOW_API_KEY not set)
-   openwebui    http://localhost:8080/api  model=gpt-oss20b-opencode  strategy=auto  key=none (OPENWEBUI_API_KEY not set)
+config: none (built-in defaults + environment)
+ * custom       https://your-provider.example/v1  model=openai/gpt-oss-20b  strategy=auto  window=32768  key=present
+   siliconflow  not set up (set SILICONFLOW_API_KEY)
+   openwebui    not set up (set OPENWEBUI_API_KEY)
 logs: .../gpt-oss-opencode/logs (metadata only; GPT_OSS_LOG_CONTENT=1 adds content, kept 14 days)
 ```
 
@@ -121,13 +228,12 @@ Leave it running. **Is your provider one of the tested ones?** Use its preset in
 | Provider | Set | OpenCode model |
 |---|---|---|
 | SiliconFlow (hosted) | `SILICONFLOW_API_KEY` | `gpt-oss/siliconflow` |
-| OpenWebUI in front of Ollama (self-hosted) | `OPENWEBUI_BASE_URL`, `OPENWEBUI_MODEL`, `OPENWEBUI_API_KEY` ([server guide](#self-hosting-with-openwebui-and-ollama)) | `gpt-oss/openwebui` |
+| OpenWebUI in front of Ollama | `OPENWEBUI_BASE_URL`, `OPENWEBUI_MODEL`, `OPENWEBUI_API_KEY`, and `OPENWEBUI_NUM_CTX` for the context ([server guide](#self-hosting-with-openwebui-and-ollama)) | `gpt-oss/openwebui` |
 
-### 2. Add the proxy to OpenCode
-
-Copy [`opencode/opencode.json`](opencode/opencode.json) to `~/.config/opencode/opencode.json`
-(on Windows `%USERPROFILE%\.config\opencode\opencode.json`). If you already have that file,
-merge the `provider` block into it; a project's own `opencode.json` works as well.
+**2. Add the proxy to OpenCode.** Copy [`opencode/opencode.json`](opencode/opencode.json) to
+`~/.config/opencode/opencode.json` (on Windows `%USERPROFILE%\.config\opencode\opencode.json`).
+If you already have that file, merge the `provider` block into it; a project's own
+`opencode.json` works as well.
 
 ```json
 {
@@ -150,8 +256,9 @@ merge the `provider` block into it; a project's own `opencode.json` works as wel
 ```
 
 - The model key (`custom`, `siliconflow`, `openwebui`) tells the proxy which provider to
-  use. `"model"` sets the default; switch with `/models` in OpenCode or `-m` on the command
-  line.
+  use. `"model"` sets the default and `"small_model"` the model for session titles; point
+  both at the provider you use (with only OpenWebUI configured: `gpt-oss/openwebui`).
+  Switch with `/models` in OpenCode or `-m` on the command line.
 - `apiKey` is a placeholder: provider keys stay with the proxy, not OpenCode.
 - `limit.context` is the model's window. Set it to your provider's real context length
   (and the same number in `CUSTOM_CONTEXT_WINDOW`). OpenCode then compacts long
@@ -159,15 +266,14 @@ merge the `provider` block into it; a project's own `opencode.json` works as wel
   limit.output`, or when the provider reports an overflow. The proxy reports the
   conversation's real size for this (internal retries and trimming don't distort it). 32768
   is a safe default; hosted providers often allow 131072. Without a `limit`, OpenCode never
-  compacts on its own.
+  compacts on its own. With the plugin you don't need this block: it registers the
+  provider with the proxy's own window.
 
-### 3. Run a task
-
-```bash
-cd /path/to/your/project
-opencode                                     # interactive; the model is preselected
-opencode run "Explain what this project does and where its entry point is."
-```
+Or use the plugin instead of both steps: add
+`"plugin": ["file:///ABSOLUTE/PATH/TO/gpt-oss-opencode/opencode/plugin/gpt-oss-proxy.ts"]`
+to OpenCode's config. OpenCode then starts the proxy (or reuses a running one) and
+registers the provider, using the same environment variables, `.env` and config file as
+`npm start`.
 
 ## Example usage
 
@@ -257,6 +363,8 @@ opencode run -c "The median test is duplicated in test/stats.test.js; remove the
 | Follow up in the last session | `opencode run -c "…"` |
 | Pick the provider for one run | `opencode run -m gpt-oss/siliconflow "…"` (or `gpt-oss/custom`, `gpt-oss/openwebui`) |
 | See what happened in a session | `npm run report -- --latest` (in the proxy folder) |
+| Check the setup, or find out why it fails | `npm run doctor` (in the proxy folder) |
+| Change the server, key, model or context | `npm run setup` again |
 
 On Windows, a prompt that contains double quotes can be mangled on the command line; pipe it
 in instead: `Get-Content task.txt | opencode run`.
@@ -269,17 +377,6 @@ in instead: `Get-Content task.txt | opencode run`.
   whether it did.
 - **Split big jobs** into steps, and continue the session with `-c` between them.
 - **Review the diff** (`git diff`) before committing, as you would a junior developer's.
-
-### Optional: let OpenCode start the proxy
-
-With the bundled plugin, OpenCode starts the proxy inside its own process, or reuses one that
-is already running, so you don't need a separate terminal:
-
-```json
-{ "plugin": ["file:///ABSOLUTE/PATH/TO/gpt-oss-opencode/opencode/plugin/gpt-oss-proxy.ts"] }
-```
-
-The plugin reads the same environment variables and config file as `npm start`.
 
 ### Optional: the `repo_overview` tool
 
@@ -383,13 +480,16 @@ are 20b prices. When you use 120b, set its prices there so the cost reports are 
 
 ### Checking a new provider
 
-1. **A full tool round trip:** with the `CUSTOM_*` variables set, run `npm run test:live`.
+1. **One tool call:** `npm run setup -- --url <address>` (and `npm run doctor` later) sends a
+   task through the proxy and shows whether the provider's native tool calls or the harmony
+   emulation carried it.
+2. **A full tool round trip:** with the `CUSTOM_*` variables set, run `npm run test:live`.
    It plays OpenCode's role against your provider, through the proxy, on a small task:
    read, edit, run the tests, answer.
-2. **The live evaluation** (optional, about an hour on a rate-limited provider):
+3. **The live evaluation** (optional, about an hour on a rate-limited provider):
    `npm run eval -- --profile custom --concurrency 1` runs the 19 scenarios behind the
    numbers in the [validation report](docs/VALIDATION_REPORT.md).
-3. **What the proxy saw:** `npm run report -- --latest` shows which strategy was used. A
+4. **What the proxy saw:** `npm run report -- --latest` shows which strategy was used. A
    `strategy_fallback` entry means the provider refused native tools and harmony emulation
    took over.
 
@@ -415,6 +515,11 @@ OpenCode ─▶ gpt-oss-proxy ─▶ OpenWebUI ─▶ Ollama ─▶ gpt-oss:20b
 
 The settings below were verified against OpenWebUI 0.11.4 and Ollama 0.34.4. Menu names may
 differ slightly in other versions.
+
+**Someone else runs the server** (a company OpenWebUI, for example)? Then steps 1–4 are the
+admin's job, and you only need its address and an API key: run `npm run setup` and choose
+OpenWebUI ([step 5](#step-5-connect-the-proxy)). Setup requests the context window with
+every call, so it works even if the server's own default is small.
 
 **Checklist:**
 
@@ -518,25 +623,43 @@ create a key. It starts with `sk-`. Treat it like a password: the proxy reads it
 
 ### Step 5: Connect the proxy
 
-On your machine:
+On your machine, in the `gpt-oss-opencode` folder:
+
+```bash
+npm run setup -- --openwebui http://your-server:8080
+```
+
+Setup asks for the API key, lists the server's models for you to pick (`gpt-oss20b-opencode`
+from step 3), and asks for the context window. It then checks a real tool call and connects
+OpenCode (see [Quick setup](#quick-setup)).
+
+**The context window.** By default the proxy sends the window you choose with every request
+(Ollama's `num_ctx`), so the server uses it whatever its own default is. This goes through
+OpenWebUI's `/api/chat/completions` route and needs no access to the server's settings. The
+same number also goes to OpenCode, so it compacts in time. Choose 32768, or 65536 if the GPU
+has the memory for longer sessions. Everyone who uses the server should choose the same
+value: Ollama reloads the model when consecutive requests ask for different context sizes.
+
+If you set the context on the server in step 1 and want the server to decide, run setup
+with `--no-num-ctx` and give the server's value. The proxy then uses the direct
+`/ollama/v1` route when the model is on an Ollama connection
+([how the routes differ](#how-the-proxy-talks-to-openwebui)).
+
+**Without setup**, set the same with environment variables (or put these lines in a `.env`
+file in this folder) and run `npm start`:
 
 ```bash
 export OPENWEBUI_BASE_URL=http://your-server:8080/api
 export OPENWEBUI_MODEL=gpt-oss20b-opencode
 export OPENWEBUI_API_KEY=sk-...
+export OPENWEBUI_NUM_CTX=65536     # requested per request; also the proxy's window
 npm start
 ```
 
 Then select **GPT-OSS via OpenWebUI** in OpenCode (`/models`, or
-`opencode run -m gpt-oss/openwebui "…"`), or make it the default in `opencode.json`.
-
-**Match the context window on the client.** The defaults assume the server uses 32768. If
-yours is larger, tell both OpenCode and the proxy, for example for 65536:
-
-- in `opencode.json`, set `"limit": { "context": 65536, "output": 8192 }` for the `openwebui`
-  model, so OpenCode compacts in time;
-- for the proxy, set `export OPENWEBUI_CONTEXT_WINDOW=65536`, so it trims before the server
-  would.
+`opencode run -m gpt-oss/openwebui "…"`), and give OpenCode the same window in
+`opencode.json`: `"limit": { "context": 65536, "output": 8192 }` for the `openwebui` model.
+With the plugin, OpenCode gets it from the proxy instead.
 
 **Keep "gpt" out of the OpenCode model key.** The provided config uses `openwebui`.
 OpenCode chooses its system prompt by model id: an id containing "gpt" gets a prompt that
@@ -545,41 +668,41 @@ the neutral key to your real OpenWebUI model id.
 
 ### Step 6: Verify
 
-1. **The model is visible to your key:**
-   ```bash
-   curl -s -H "Authorization: Bearer $OPENWEBUI_API_KEY" http://your-server:8080/api/models
-   ```
-   Look for your model id. `"owned_by": "ollama"` means the proxy will use the direct Ollama
-   route (preferred, see below).
-2. **The proxy has the key:** its startup lines show `openwebui … key=present`.
-3. **A full tool round trip works:** `npm run test:live` sends a real task through the proxy
-   to your server, with the same variables set. Providers that aren't configured are
-   skipped.
-4. **Optional: the live evaluation** against your server, which takes about 30 minutes:
+1. **Setup and connection:** `npm run doctor` checks that the server is reachable, the key
+   accepted and the model listed, and sends one real task through the proxy.
+2. **A full tool round trip** (read, edit, run the tests, answer): `npm run test:live` with
+   the `OPENWEBUI_*` variables set. Providers that aren't configured are skipped.
+3. **Optional: the live evaluation** against your server, which takes about 30 minutes:
    `npm run eval -- --profile openwebui --concurrency 1`.
 
 ### How the proxy talks to OpenWebUI
 
-The proxy asks `/api/models` who owns the model, then picks one of two routes. You can force
-one with `OPENWEBUI_ROUTE=ollama-v1` or `OPENWEBUI_ROUTE=api`.
+When a context is requested (`numCtx`, which setup writes by default), the proxy uses route
+`api`, the only one that carries it. Otherwise it asks `/api/models` who owns the model and
+picks one of two routes. You can force one with `OPENWEBUI_ROUTE=ollama-v1` or
+`OPENWEBUI_ROUTE=api`.
 
 | Route | Used when | Behaviour |
 |---|---|---|
 | `ollama-v1` → `/ollama/v1/chat/completions` | the model is on an **Ollama connection** (`owned_by: "ollama"`) | OpenWebUI applies your model entry and passes requests to Ollama's own OpenAI API. Tool results keep their names, `max_tokens` and `reasoning_effort` work, and errors keep their message. The context length comes from the server (step 1). |
-| `api` → `/api/chat/completions` | the model is on an OpenAI-type connection, or the route is forced | Full OpenWebUI pipeline. On an Ollama connection it drops `max_tokens`, `temperature`, `reasoning_effort` and the names of tool results. The proxy compensates: it sends `options.num_predict`, labels tool results (`[read result]`), and can send `options.num_ctx` (`OPENWEBUI_NUM_CTX`). It also recognises Ollama errors that arrive disguised as an empty answer, and retries them. |
+| `api` → `/api/chat/completions` | a context is requested (`numCtx`), the model is on an OpenAI-type connection, or the route is forced | Full OpenWebUI pipeline. On an Ollama connection it drops `max_tokens`, `temperature`, `reasoning_effort` and the names of tool results. The proxy compensates: it sends `options.num_predict`, labels tool results (`[read result]`), and sends `options.num_ctx` (`numCtx`, `OPENWEBUI_NUM_CTX`). It also recognises Ollama errors that arrive disguised as an empty answer, and retries them. |
 
 The default strategy for OpenWebUI is native tool calling. If the backend answers "tools not
 supported", the proxy switches to emulated tool calls and remembers that.
 
 ### Troubleshooting
 
+`npm run doctor` finds most of these and says what to do.
+
 | Symptom | Cause | Fix |
 |---|---|---|
-| HTTP 403 "Use of API key is not enabled" | API keys are off | Step 2 |
-| HTTP 401 | wrong or missing key | check `OPENWEBUI_API_KEY`; the startup line should say `key=present` |
-| HTTP 400 "Model not found" | the id differs from `/api/models`, or the list is stale | compare with `curl …/api/models` (step 6); reload OpenWebUI after creating a model |
-| The model "forgets" the task, stops using tools, or OpenCode shows `[gpt-oss-proxy] the model server evaluated only N of ~M prompt tokens` | the server's context is too small, so Ollama cut the conversation | Step 1; then match the client window (step 5) |
+| "API keys are switched off on this OpenWebUI server" (HTTP 403 "Use of API key is not enabled") | API keys are off | Step 2 |
+| "The server rejected the API key" (HTTP 401) | wrong or revoked key | create a new key (step 4) and run `npm run setup` again. A key in `OPENWEBUI_API_KEY` overrides the saved `openwebui.key` |
+| HTTP 400 "Model not found" | the id differs from `/api/models`, or the list is stale | run `npm run setup` and pick the model from the list; reload OpenWebUI after creating a model |
+| The model "forgets" the task, stops using tools, or OpenCode shows `[gpt-oss-proxy] the model server evaluated only N of ~M prompt tokens` | the server's context is smaller than the proxy's window, so Ollama cut the conversation | run `npm run setup` without `--no-num-ctx` (the window is then requested per request), or step 1 |
 | The first answer takes very long | Ollama is loading the model into memory, or part of the model runs on the CPU | wait for the first load; check GPU memory |
+| Answers on a shared server are often slow to start | requests with different context sizes alternate (other users, the OpenWebUI chat), and Ollama reloads the model each time | everyone uses the same `--context`; an admin can make it the server default too |
+| Settings you saved with setup seem ignored | `OPENWEBUI_*` variables in your shell or `.env` override the config file | `npm run doctor` lists them; remove them |
 | `npm run report -- --latest` shows `strategy_fallback` | the backend refused native tool calls | nothing to do; emulated tool calls are used automatically |
 
 ## Configuration reference
@@ -598,6 +721,14 @@ so several providers can be configured at once and you switch in OpenCode.
 To use **several custom providers**, add named profiles to the config file (see below).
 Each gets its own `<NAME>_*` variables and OpenCode model key `gpt-oss/<name>`.
 
+**Where settings come from**, later wins: built-in defaults, then the config file
+(`gpt-oss-proxy.config.json`, which `npm run setup` writes), then environment variables. A
+`.env` file in the proxy folder counts as environment variables, but ones already set in
+your shell win over it. `npm start` prints the config file and `.env` in use, and
+`npm run doctor` also lists the variables that override the file. A preset counts as set up
+once it has a key or an address of your own; until then its OpenCode model answers with how
+to set it up.
+
 ### Environment variables
 
 | Variable | Effect |
@@ -606,12 +737,13 @@ Each gets its own `<NAME>_*` variables and OpenCode model key `gpt-oss/<name>`.
 | `<PROFILE>_BASE_URL`, `<PROFILE>_MODEL`, `<PROFILE>_STRATEGY` | override any profile, e.g. `OPENWEBUI_BASE_URL=http://gpu-box:8080/api`, `CUSTOM_STRATEGY=harmony` |
 | `<PROFILE>_CONTEXT_WINDOW` | the provider's real context length in tokens, e.g. `CUSTOM_CONTEXT_WINDOW=131072` |
 | `SILICONFLOW_API_KEY`, `OPENWEBUI_API_KEY` | keys for the presets |
-| `OPENWEBUI_ROUTE`, `OPENWEBUI_NUM_CTX` | OpenWebUI route (`auto`, `ollama-v1`, `api`) and per-request `num_ctx` (route `api` only) |
+| `OPENWEBUI_NUM_CTX` | context requested from the server with every request (Ollama `num_ctx`). Selects route `api` and is also the window, unless `OPENWEBUI_CONTEXT_WINDOW` is set |
+| `OPENWEBUI_ROUTE` | force the OpenWebUI route: `auto`, `ollama-v1`, `api` |
 | `GPT_OSS_PORT`, `GPT_OSS_HOST` | listen address (default `127.0.0.1:8787`) |
 | `GPT_OSS_PROXY_TOKEN` | require `Authorization: Bearer <token>` from clients (put the same value in OpenCode's `apiKey`). **Required** for any address other than localhost; see [Security](#security-privacy-and-logs) |
 | `GPT_OSS_PROFILE` | profile used when OpenCode sends a model id that matches no profile (default `custom`) |
 | `GPT_OSS_STRATEGY` | force a strategy for all profiles: `harmony`, `native`, `json`, `auto` |
-| `GPT_OSS_CONFIG` | config file path (default `./gpt-oss-proxy.config.json` if present) |
+| `GPT_OSS_CONFIG` | config file path (default `./gpt-oss-proxy.config.json` if present; for the plugin, in the proxy folder). `npm run setup` writes to it too, with the key files next to it |
 | `GPT_OSS_LOG_DIR` | log directory (default `./logs`) |
 | `GPT_OSS_LOG_CONTENT=1` | also log prompts, model output, tool-call values and result previews |
 | `GPT_OSS_LOG_RETENTION_DAYS` | delete log days older than this (default `14`; `0` keeps everything) |
@@ -619,10 +751,21 @@ Each gets its own `<NAME>_*` variables and OpenCode model key `gpt-oss/<name>`.
 
 ### Config file
 
-For anything beyond environment variables, copy
-[`gpt-oss-proxy.config.example.json`](gpt-oss-proxy.config.example.json) to
-`gpt-oss-proxy.config.json` and edit it. Profiles you add there start from the neutral
-`custom` defaults. Each profile accepts:
+`npm run setup` writes `gpt-oss-proxy.config.json` for you, for example:
+
+```json
+{
+  "defaultProfile": "openwebui",
+  "profiles": {
+    "openwebui": { "baseURL": "http://gpu-server:8080/api", "model": "gpt-oss20b-opencode", "numCtx": 65536, "apiKeyFile": "openwebui.key" }
+  }
+}
+```
+
+To write one by hand, start from
+[`gpt-oss-proxy.config.example.json`](gpt-oss-proxy.config.example.json). Setup keeps
+what it doesn't manage (other profiles, `limits`, `extraBody`, …) when it runs again.
+Profiles you add start from the neutral `custom` defaults. Each profile accepts:
 
 | Option | Meaning |
 |---|---|
@@ -630,6 +773,8 @@ For anything beyond environment variables, copy
 | `apiKeyEnv` or `apiKeyFile` | where the key comes from: an environment variable, or a one-line file such as `"apiKeyFile": "key.txt"` |
 | `strategy`, `fallbackStrategy` | tool-call strategy (see below) |
 | `contextWindow`, `maxOutputTokens` | the provider's limits |
+| `numCtx` | OpenWebUI: the context to request with every request; also `contextWindow` unless that is set (see [how the proxy talks to OpenWebUI](#how-the-proxy-talks-to-openwebui)) |
+| `openwebuiRoute` | OpenWebUI: `auto` (default), `api` or `ollama-v1` |
 | `stream` | stream from the provider (turn off if its stream is broken) |
 | `extraBody` | merged into every request, e.g. `{"reasoning_effort": "low"}` |
 | `headers`, `pricing`, `toolDescriptions`, `aliases` | extra headers, USD per 1M tokens for cost reporting, `compact` or `full` tool descriptions, extra model ids |
@@ -653,7 +798,9 @@ Timeouts, retry and repair budgets and loop thresholds are under `limits` in the
   other address unless `GPT_OSS_PROXY_TOKEN` is set, because anyone who can reach it could
   spend your provider keys.
 - **Keys stay with the proxy.** They are read from the environment or a key file and are
-  never logged. OpenCode only holds a placeholder, or the proxy token.
+  never logged. OpenCode only holds a placeholder, or the proxy token. `npm run setup` saves
+  the key in its own file (`<provider>.key`, mode 600 on Linux and macOS), never in the
+  config file, and both are git-ignored.
 - **Logs are metadata only by default.** One JSONL file per session is written to
   `logs/<date>/<session>.jsonl`. It records timings, tools, paths, commands, sizes, retries,
   errors, tokens and cost. Your prompts, the model's output and file contents are left out;
@@ -702,7 +849,7 @@ has not been measured yet. Full results are in the
 ## Development
 
 ```bash
-npm test                 # 148 unit and contract tests; offline, uses the same AI SDK package as OpenCode
+npm test                 # 168 unit and contract tests; offline, uses the same AI SDK package as OpenCode
 npm run typecheck        # tsc --noEmit (TypeScript runs natively on Node; no build step)
 npm run test:live        # a real tool round trip for each configured provider (small cost)
 npm run eval -- --profile custom --concurrency 1    # live evaluation: real OpenCode + proxy + your provider, 19 scenarios

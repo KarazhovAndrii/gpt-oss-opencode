@@ -16,10 +16,13 @@
   },
   "bin": {
     "gpt-oss-proxy": "bin/gpt-oss-proxy.ts",
-    "gpt-oss-report": "bin/report.ts"
+    "gpt-oss-report": "bin/report.ts",
+    "gpt-oss-setup": "bin/setup.ts"
   },
   "scripts": {
     "start": "node bin/gpt-oss-proxy.ts",
+    "setup": "node bin/setup.ts",
+    "doctor": "node bin/setup.ts --doctor",
     "test": "node --test \"test/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "report": "node bin/report.ts",

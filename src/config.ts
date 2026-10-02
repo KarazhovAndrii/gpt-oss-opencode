@@ -10,6 +10,9 @@
 //   GPT_OSS_LOG_RETENTION_DAYS  delete log days older than this at startup and daily (0 = keep)
 //   <PROFILE>_BASE_URL / <PROFILE>_MODEL   e.g. CUSTOM_BASE_URL, OPENWEBUI_MODEL
 //   <PROFILE>_CONTEXT_WINDOW  the model server's real context length (tokens)
+//   <PROFILE>_NUM_CTX         OpenWebUI: context requested per request; also the window unless set
+// The CLI and the OpenCode plugin first load a .env file next to the config (loadDotEnv);
+// variables already in the environment win over it.
 //
 // Profiles: "custom" (the default) is any OpenAI-compatible provider serving GPT-OSS (20b or 120b),
 // configured with CUSTOM_BASE_URL, CUSTOM_MODEL and CUSTOM_API_KEY (optional for local
@@ -27,7 +30,11 @@ export interface Profile {
   baseURL: string;
   /** OpenWebUI only: "auto" (by owned_by), "api" (/api/chat/completions) or "ollama-v1" (/ollama/v1 passthrough). */
   openwebuiRoute?: "auto" | "api" | "ollama-v1";
-  /** OpenWebUI route "api" only: Ollama num_ctx sent per request (options.num_ctx). */
+  /**
+   * OpenWebUI: Ollama num_ctx sent with every request (options.num_ctx), so the server uses
+   * this context whatever its own default. Only route "api" carries it, so "auto" picks that
+   * route; it is also the profile's contextWindow unless one is set explicitly.
+   */
   numCtx?: number;
   model: string;
   /** Environment variable holding the API key (never logged). */
@@ -99,6 +106,8 @@ export interface Config {
   logRetentionDays: number;
   profiles: Record<string, Profile>;
   limits: Limits;
+  /** The config file that was loaded, if any (shown at startup). */
+  configFile?: string;
 }
 
 export const DEFAULT_LIMITS: Limits = {
@@ -174,8 +183,9 @@ export const DEFAULT_PROFILES: Record<string, Profile> = {
   },
 };
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): Config {
-  const cfg: Config = {
+/** The built-in configuration, before any config file or environment variable. */
+export function defaultConfig(cwd = process.cwd()): Config {
+  return {
     host: "127.0.0.1",
     port: 8787,
     defaultProfile: "custom",
@@ -185,10 +195,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
     profiles: structuredClone(DEFAULT_PROFILES),
     limits: { ...DEFAULT_LIMITS },
   };
-  const file = env.GPT_OSS_CONFIG ?? path.resolve(cwd, "gpt-oss-proxy.config.json");
+}
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): Config {
+  const cfg = defaultConfig(cwd);
+  // Profiles whose contextWindow was set explicitly; for the others numCtx sets it.
+  const explicitWindow = new Set<string>();
+  const file = path.resolve(cwd, env.GPT_OSS_CONFIG ?? "gpt-oss-proxy.config.json");
   if (fs.existsSync(file)) {
-    const raw = JSON.parse(fs.readFileSync(file, "utf8"));
-    mergeConfig(cfg, raw, path.dirname(path.resolve(file)));
+    let raw: any;
+    try {
+      raw = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch (e) {
+      throw new Error(`${file} is not valid JSON: ${(e as Error).message}`);
+    }
+    mergeConfig(cfg, raw, path.dirname(file), explicitWindow);
+    cfg.configFile = file;
   } else if (env.GPT_OSS_CONFIG) {
     throw new Error(`GPT_OSS_CONFIG points to a missing file: ${file}`);
   }
@@ -205,7 +227,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
     if (env[`${prefix}_STRATEGY`]) p.strategy = env[`${prefix}_STRATEGY`] as Strategy;
     if (env[`${prefix}_ROUTE`]) p.openwebuiRoute = env[`${prefix}_ROUTE`] as Profile["openwebuiRoute"];
     if (env[`${prefix}_NUM_CTX`]) p.numCtx = Number(env[`${prefix}_NUM_CTX`]);
-    if (env[`${prefix}_CONTEXT_WINDOW`]) p.contextWindow = Number(env[`${prefix}_CONTEXT_WINDOW`]);
+    if (env[`${prefix}_CONTEXT_WINDOW`]) {
+      p.contextWindow = Number(env[`${prefix}_CONTEXT_WINDOW`]);
+      explicitWindow.add(p.name);
+    }
+    // The server is asked for numCtx on every request, so that is the window to plan for.
+    if (p.kind === "openwebui" && p.numCtx && !explicitWindow.has(p.name)) p.contextWindow = p.numCtx;
     if (env.GPT_OSS_STRATEGY) p.strategy = env.GPT_OSS_STRATEGY as Strategy;
     p.baseURL = p.baseURL.replace(/\/+$/, "");
   }
@@ -213,7 +240,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
   return cfg;
 }
 
-function mergeConfig(cfg: Config, raw: any, baseDir: string) {
+function mergeConfig(cfg: Config, raw: any, baseDir: string, explicitWindow: Set<string>) {
   for (const k of ["host", "port", "defaultProfile", "logContent", "logRetentionDays"] as const) if (raw[k] !== undefined) (cfg as any)[k] = raw[k];
   // Pre-release name of logContent.
   if (raw.logContent === undefined && raw.logModelOutput !== undefined) cfg.logContent = !!raw.logModelOutput;
@@ -223,6 +250,7 @@ function mergeConfig(cfg: Config, raw: any, baseDir: string) {
     const base = cfg.profiles[name] ?? { ...DEFAULT_PROFILES.custom, name, aliases: [], apiKeyEnv: undefined };
     cfg.profiles[name] = { ...base, ...p, name };
     if (p.apiKeyFile) cfg.profiles[name].apiKeyFile = path.resolve(baseDir, p.apiKeyFile);
+    if (p.contextWindow !== undefined) explicitWindow.add(name);
   }
 }
 
@@ -236,7 +264,21 @@ function validateConfig(cfg: Config) {
     // An empty baseURL means "not configured"; requests to such a profile get a diagnostic (server.ts).
     if (p.baseURL && !/^https?:\/\//.test(p.baseURL)) throw new Error(`profile ${p.name}: baseURL must be http(s): ${p.baseURL}`);
     if (!(p.contextWindow >= 4096)) throw new Error(`profile ${p.name}: contextWindow must be a number >= 4096 (got ${p.contextWindow})`);
+    if (p.kind === "openwebui" && p.numCtx !== undefined) {
+      if (!(p.numCtx >= 4096)) throw new Error(`profile ${p.name}: numCtx must be a number >= 4096 (got ${p.numCtx})`);
+      // The server would cut every conversation longer than numCtx without an error.
+      if (p.numCtx < p.contextWindow)
+        throw new Error(`profile ${p.name}: numCtx (${p.numCtx}) is smaller than contextWindow (${p.contextWindow}), so the server would cut long conversations. Set only numCtx (it is then the window too), or the same value for both.`);
+    }
   }
+}
+
+/** Loads <dir>/.env into process.env, if present; variables already set win. Returns the file loaded. */
+export function loadDotEnv(dir: string): string | undefined {
+  const file = path.join(dir, ".env");
+  if (!fs.existsSync(file)) return undefined;
+  process.loadEnvFile(file);
+  return file;
 }
 
 export function envPrefix(p: Profile): string {
@@ -256,6 +298,15 @@ export function selectProfile(cfg: Config, requestedModel: string | undefined): 
     if (at && cfg.profiles[at]) return cfg.profiles[at];
   }
   return cfg.profiles[cfg.defaultProfile];
+}
+
+/**
+ * Set up by the user: an address of their own, or a key for a preset's built-in address
+ * (SiliconFlow's API, OpenWebUI on localhost), which alone does not mean it is in use.
+ */
+export function isSetUp(p: Profile, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (!p.baseURL) return false;
+  return p.baseURL !== DEFAULT_PROFILES[p.name]?.baseURL || !!apiKeyFor(p, env);
 }
 
 export function apiKeyFor(p: Profile, env: NodeJS.ProcessEnv = process.env): string | undefined {

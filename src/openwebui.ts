@@ -15,6 +15,8 @@
 //
 // "auto" asks GET <root>/api/models for the model's owned_by: "ollama" -> ollama-v1,
 // anything else (OpenAI-type connection, e.g. Ollama /v1 added as OpenAI) -> api.
+// A profile with numCtx always gets "api": the only route that can carry num_ctx, which
+// is how a user who cannot change the server gets the context they need.
 
 import type { Profile } from "./config.ts";
 import { apiKeyFor } from "./config.ts";
@@ -89,17 +91,18 @@ function owuiSafeMessages(messages: ChatMessage[]): ChatMessage[] {
 export async function resolveTarget(profile: Profile, fetchImpl: typeof fetch = fetch): Promise<Target> {
   if (profile.kind !== "openwebui") return { profile, patchBody: (b) => b };
   const want = profile.openwebuiRoute ?? "auto";
-  const det = want === "auto" ? await detect(profile, fetchImpl) : { route: want as OwuiRoute };
+  let det: { route: OwuiRoute; ownedBy?: string; note?: string } = want === "auto" ? await detect(profile, fetchImpl) : { route: want as OwuiRoute };
+  if (want === "auto" && profile.numCtx && det.route === "ollama-v1") det = { ...det, route: "api", note: `numCtx ${profile.numCtx} is set: using /api/chat/completions, the route that carries num_ctx` };
   const root = owuiRoot(profile.baseURL);
   if (det.route === "ollama-v1") {
-    return { profile: { ...profile, baseURL: `${root}/ollama/v1` }, route: "ollama-v1", ownedBy: (det as any).ownedBy, note: (det as any).note, patchBody: (b) => b };
+    return { profile: { ...profile, baseURL: `${root}/ollama/v1` }, route: "ollama-v1", ownedBy: det.ownedBy, note: det.note, patchBody: (b) => b };
   }
-  const ollamaBacked = (det as any).ownedBy === "ollama";
+  const ollamaBacked = det.ownedBy === "ollama";
   return {
     profile: { ...profile, baseURL: `${root}/api` },
     route: "api",
-    ownedBy: (det as any).ownedBy,
-    note: (det as any).note,
+    ownedBy: det.ownedBy,
+    note: det.note,
     patchBody: (b) => {
       const out: Record<string, unknown> = { ...b };
       // Only `options` reaches Ollama on this route: carry the output cap and context size there.
@@ -109,7 +112,7 @@ export async function resolveTarget(profile: Profile, fetchImpl: typeof fetch = 
       out.options = options;
       if (Array.isArray(b.messages)) {
         let msgs = owuiSafeMessages(b.messages as ChatMessage[]);
-        if (ollamaBacked || (det as any).ownedBy === undefined) msgs = labelToolResults(msgs);
+        if (ollamaBacked || det.ownedBy === undefined) msgs = labelToolResults(msgs);
         out.messages = msgs;
       }
       return out;

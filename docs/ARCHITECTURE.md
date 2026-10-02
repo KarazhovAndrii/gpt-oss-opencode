@@ -52,8 +52,13 @@ Why a proxy rather than an OpenCode plugin: the incompatibility is in the
 provider transport (how tool calls are encoded), which plugins cannot change;
 a proxy is also testable in isolation with the same AI SDK package OpenCode
 uses, works with any OpenCode UI (TUI, `run`, server), and switching providers
-is configuration only. An optional plugin (`opencode/plugin/gpt-oss-proxy.ts`)
-can host the proxy inside OpenCode's process for convenience.
+is configuration only. The plugin (`opencode/plugin/gpt-oss-proxy.ts`, set up by
+`npm run setup`) hosts the proxy inside OpenCode's process and registers the `gpt-oss`
+provider through OpenCode's `config` hook, with one model per set-up profile and
+`limit.context` taken from the proxy's `contextWindow`, so the window lives in one place.
+If another window's proxy already serves the port it is used; the `chat.params` hook
+starts this window's own before the next model call if that one has gone. A config file
+that does not load still starts a proxy, which answers every request with the error.
 
 ### Provider profiles
 
@@ -98,6 +103,10 @@ Verified from OpenWebUI 0.11.4 / Ollama 0.34.4 source and live against both:
   the converter's invariants (assistant `content` never `null` without tool calls,
   string tool results, JSON-object arguments), and recognises the empty `"stop"` chunk
   with model `"ollama"` and no usage that OpenWebUI emits when Ollama fails mid-stream.
+- **`numCtx` set → route `api`** even for an Ollama-owned model: only that route carries
+  `num_ctx`, and requesting it per request is how a user without access to the server
+  gets a large enough window. `numCtx` is then also the profile's `contextWindow` unless
+  one is set (a smaller `numCtx` than the window is a config error: the server would cut).
 - Both routes: Ollama's `"error parsing tool call"` becomes a re-prompt to the model;
   `{"detail": …}` errors (string, object or list) are read; 401/403 and "model not
   found" produce setup hints; and **context truncation** is detected from the provider's
@@ -226,8 +235,11 @@ validation, bounded recovery and observability.
 | `src/compact.ts` | compaction of long built-in tool descriptions (default on; bash and PowerShell shapes of the `bash` tool, OpenCode's PowerShell shell notes kept verbatim) |
 | `src/shell.ts` | which shell runs OpenCode's `bash` tool; Windows PowerShell 5.1 command checks |
 | `src/openwebui.ts` | OpenWebUI route selection and payload fixes |
+| `src/config.ts` | profiles, limits, config file + environment (`.env` via `loadDotEnv`), `isSetUp` |
+| `src/opencode.ts` | OpenCode's `gpt-oss` provider block derived from the proxy config (plugin, `--no-plugin` setup, shipped example) |
+| `src/setup.ts`, `bin/setup.ts` | `npm run setup` / `npm run doctor`: model listing with actionable errors, a tool-call check through an in-process proxy, config + key file, comment-preserving edits of OpenCode's JSONC config |
 | `src/log.ts`, `src/sessionreport.ts`, `bin/report.ts` | JSONL diagnostics (metadata only unless `logContent`; day folders pruned after `logRetentionDays`) and the session report tool |
-| `opencode/` | OpenCode config example, optional plugin, optional `repo_overview` tool |
+| `opencode/` | OpenCode plugin (runs the proxy, registers the provider), config example for running the proxy separately, optional `repo_overview` tool |
 | `eval/` | live evaluation harness (`run.ts`; `--shell` picks bash, Windows PowerShell 5.1 or pwsh), scenarios, synthetic fixture repos, `generators/` for large inputs made per run, `recheck.ts`/`compare.ts` |
 | `scripts/` | provider probes, request replay, OpenWebUI wire probe, local OpenWebUI + Ollama stack |
 | `test/` | unit + contract tests (mock provider, AI SDK client) |

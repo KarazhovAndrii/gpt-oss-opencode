@@ -12,6 +12,7 @@ Design and measurements: `docs/ARCHITECTURE.md`; test results: `docs/VALIDATION_
 
 ## Commands
 
+- `npm run setup` — interactive setup (address, key, model, context; checks a real tool call; writes `gpt-oss-proxy.config.json` + `<profile>.key`, and OpenCode's config: plugin + default model, JSONC comments kept). Flags pre-fill answers (`--openwebui URL --model ID --context N --key-file F --yes`); `GPT_OSS_CONFIG` / `XDG_CONFIG_HOME` redirect what it writes. `npm run doctor` checks a setup without changing it.
 - `npm start` — run the proxy (`http://127.0.0.1:8787/v1`); point it at a provider with `CUSTOM_BASE_URL` (+ `CUSTOM_MODEL`, `CUSTOM_API_KEY`), or use a preset (`SILICONFLOW_API_KEY`, `OPENWEBUI_*`).
 - `npm test` — unit + contract tests (offline; mock provider + the AI SDK package OpenCode uses).
 - `npm run test:live` — live provider tests, one per configured provider (`CUSTOM_BASE_URL`, `SILICONFLOW_API_KEY`, `OPENWEBUI_API_KEY`); small cost.
@@ -27,7 +28,7 @@ parser, validation/schema, guard, context guard, emitter, logging), `bin/` CLIs,
 offline tests (+ `test/live/`), `eval/` harness + scenarios + `fixtures/` synthetic repos
 (copied to `.eval-runs/` per run — never run agents inside the source tree) + `hidden/`
 acceptance tests the agent never sees (`cpp-evaluator` compiles one via `eval/lib/cxx.ts`:
-g++/clang++/MSVC through vswhere), `opencode/` config example, optional plugin and optional custom tool, `scripts/` provider probes.
+g++/clang++/MSVC through vswhere), `opencode/` plugin (runs the proxy in OpenCode, registers the provider from the proxy config), config example and optional custom tool, `scripts/` provider probes.
 
 ## Conventions
 

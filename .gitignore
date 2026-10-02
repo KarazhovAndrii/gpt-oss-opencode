@@ -1,4 +1,7 @@
 key.txt
+# Written by `npm run setup`: your provider address and API key.
+gpt-oss-proxy.config.json
+*.key
 node_modules/
 logs/
 .eval-runs/

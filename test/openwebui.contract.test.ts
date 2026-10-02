@@ -52,6 +52,22 @@ describe("OpenWebUI profile", () => {
     }
   });
 
+  test("auto route with numCtx: /api/chat/completions even for an Ollama model, the only route that carries num_ctx", async () => {
+    up.setModels([{ id: MODEL, owned_by: "ollama" }]);
+    up.push({ kind: "raw", contentType: "text/event-stream", body: API_SSE });
+    const px = await proxy({ numCtx: 65536 });
+    try {
+      await chat(px.url, base());
+      assert.deepEqual(up.paths, ["/api/models", "/api/chat/completions"]);
+      assert.equal(up.requests[0].options.num_ctx, 65536);
+      const route = px.events().find((e) => e.type === "route");
+      assert.equal(route?.route, "api");
+      assert.match(route?.note ?? "", /numCtx 65536 is set/);
+    } finally {
+      await px.close();
+    }
+  });
+
   test("auto route: a model on an OpenAI-type connection uses /api/chat/completions", async () => {
     up.setModels([{ id: MODEL, owned_by: "openai" }]);
     up.push({ kind: "raw", contentType: "text/event-stream", body: OLLAMA_V1_SSE });

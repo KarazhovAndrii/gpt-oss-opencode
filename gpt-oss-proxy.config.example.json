@@ -45,7 +45,7 @@
       "contextWindow": 32768,
       "extraBody": {},
       "toolDescriptions": "compact",
-      "//numCtx": "route \"api\" only: e.g. 32768 is sent as options.num_ctx; on route \"ollama-v1\" set OLLAMA_CONTEXT_LENGTH on the Ollama server instead"
+      "//numCtx": "e.g. 65536: requested from the server with every request (options.num_ctx), which works without access to the server; selects route \"api\" and is the contextWindow too. Without it, the server's own context (OLLAMA_CONTEXT_LENGTH) applies and contextWindow must match it"
     }
   },
   "limits": {

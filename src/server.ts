@@ -4,7 +4,7 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import type { Config } from "./config.ts";
-import { selectProfile, apiKeyFor, envPrefix } from "./config.ts";
+import { selectProfile, apiKeyFor, envPrefix, isSetUp } from "./config.ts";
 import { Logger, truncate } from "./log.ts";
 import { ChatEmitter } from "./emitter.ts";
 import { runChat, type ChatRequest } from "./agent.ts";
@@ -14,6 +14,8 @@ export interface ServerOptions {
   cfg: Config;
   logger?: Logger;
   fetchImpl?: typeof fetch;
+  /** The configuration could not be loaded: every chat request is answered with this, in OpenCode. */
+  startupError?: string;
 }
 
 function readBody(req: http.IncomingMessage, limit = 64 * 1024 * 1024): Promise<string> {
@@ -85,7 +87,7 @@ export function createServer(opts: ServerOptions): http.Server {
         return json(res, 200, { object: "list", data: [...ids].map((id) => ({ id, object: "model", owned_by: "gpt-oss-proxy" })) });
       }
       if (req.method === "POST" && (url === "/v1/chat/completions" || url === "/chat/completions")) {
-        return await handleChat(req, res, cfg, logger, opts.fetchImpl);
+        return await handleChat(req, res, cfg, logger, opts.fetchImpl, opts.startupError);
       }
       json(res, 404, { error: { message: `not found: ${req.method} ${url}`, type: "not_found" } });
     } catch (e) {
@@ -96,7 +98,7 @@ export function createServer(opts: ServerOptions): http.Server {
   });
 }
 
-async function handleChat(req: http.IncomingMessage, res: http.ServerResponse, cfg: Config, logger: Logger, fetchImpl?: typeof fetch) {
+async function handleChat(req: http.IncomingMessage, res: http.ServerResponse, cfg: Config, logger: Logger, fetchImpl?: typeof fetch, startupError?: string) {
   let body: ChatRequest;
   try {
     body = JSON.parse(await readBody(req));
@@ -112,12 +114,20 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse, c
   const includeUsage = !stream || !!(body.stream_options as any)?.include_usage;
   const emitter = new ChatEmitter(res, { stream, includeUsage, model: body.model ?? profile.name, id: `chatcmpl-${reqId}` });
 
-  if (!profile.baseURL) {
+  if (startupError) {
+    logger.event(session, "guard_stop", { req: reqId, kind: "config_error", reason: startupError });
+    emitter.content(`[gpt-oss-proxy] The proxy configuration could not be loaded: ${startupError}\nFix it (or run "npm run setup" in the gpt-oss-opencode folder) and restart OpenCode.`);
+    emitter.finish("stop");
+    return;
+  }
+
+  if (!isSetUp(profile)) {
     const px = envPrefix(profile);
-    const configured = Object.values(cfg.profiles).filter((p) => p.baseURL).map((p) => p.name);
-    logger.event(session, "guard_stop", { req: reqId, kind: "not_configured", reason: `profile ${profile.name} has no baseURL` });
+    const configured = Object.values(cfg.profiles).filter((p) => isSetUp(p)).map((p) => p.name);
+    const missing = profile.baseURL ? `has no API key yet (${profile.apiKeyEnv ?? "apiKeyFile"})` : "has no address yet";
+    logger.event(session, "guard_stop", { req: reqId, kind: "not_configured", reason: `profile ${profile.name} ${missing}` });
     emitter.content(
-      `[gpt-oss-proxy] Model "${body.model ?? ""}" uses the provider profile "${profile.name}", which has no address yet. Set ${px}_BASE_URL (plus ${px}_MODEL and ${px}_API_KEY if your provider needs them) and restart the proxy${configured.length ? `, or use one of the configured profiles: ${configured.join(", ")}` : ""}.`,
+      `[gpt-oss-proxy] Model "${body.model ?? ""}" uses the provider profile "${profile.name}", which ${missing}. Run "npm run setup" in the gpt-oss-opencode folder, or set ${px}_BASE_URL (plus ${px}_MODEL and ${px}_API_KEY if your provider needs them) and restart the proxy${configured.length ? `, or use one of the configured profiles: ${configured.join(", ")}` : ""}.`,
     );
     emitter.finish("stop");
     return;
