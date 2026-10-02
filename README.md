@@ -87,7 +87,7 @@ dependencies · MIT license.
 
 ## Quick setup
 
-You need **Node.js 22.18 or newer**, **OpenCode 1.18 or newer**, and access to
+You need **Node.js 22.18 or newer**, **OpenCode 1.14 or newer, or OpenCode 2.x**, and access to
 **gpt-oss-20b or gpt-oss-120b** through an OpenAI-compatible API, for example an OpenWebUI
 server and an API key for it. Check the [provider requirements](#llm-provider-requirements)
 if you are unsure.
@@ -127,9 +127,11 @@ Saving
   ok  …/gpt-oss-opencode/gpt-oss-proxy.config.json (no secrets in it)
   ok  …/gpt-oss-opencode/openwebui.key (your API key; git-ignored)
   ok  ~/.config/opencode/opencode.json
-        plugin: file:///…/gpt-oss-opencode/opencode/plugin/gpt-oss-proxy.ts (OpenCode starts the proxy itself)
+        plugin: file:///…/gpt-oss-opencode/opencode/plugin (OpenCode 1.x and 2.x start the proxy from this folder)
+        provider "gpt-oss": openwebui (context 65536)
         model: gpt-oss/openwebui
         small_model: gpt-oss/openwebui
+  OpenCode 2.0.22 found (the plugin folder works with OpenCode 1.x and 2.x).
 
 Ready. In your project folder run: opencode
 ```
@@ -143,8 +145,12 @@ opencode run "Explain what this project does and where its entry point is."
 ```
 
 OpenCode starts the proxy itself through the bundled plugin, so you don't need a second
-terminal. The plugin also tells OpenCode the context size you chose, so OpenCode compacts
-long conversations before they overflow.
+terminal. Setup also tells OpenCode the context size you chose, so OpenCode compacts long
+conversations before they overflow.
+
+**OpenCode 1.x and 2.x** both work with what setup writes (tested with 1.14, 1.17, 1.18 and
+2.0). OpenCode 2.x keeps a background service running: after running setup while OpenCode
+2.x is open, restart it with `opencode service restart`.
 
 **What setup writes:**
 
@@ -152,7 +158,7 @@ long conversations before they overflow.
 |---|---|
 | `gpt-oss-proxy.config.json` in this folder | address, model id, context; no secrets (git-ignored) |
 | `<provider>.key` in this folder, e.g. `openwebui.key` | your API key (git-ignored; file mode 600 on Linux and macOS) |
-| OpenCode's config: `~/.config/opencode/opencode.json`, or the `opencode.jsonc` you already have (on Windows under `%USERPROFILE%\.config\opencode\`) | the plugin, and `gpt-oss/<provider>` as the default model and title model. Your other settings and comments stay; a backup is saved next to it. If you already have another default model, setup asks before changing it |
+| OpenCode's config: `~/.config/opencode/opencode.json`, or the `opencode.jsonc` you already have (on Windows under `%USERPROFILE%\.config\opencode\`) | the plugin folder, the `gpt-oss` provider with the context from the proxy config, and `gpt-oss/<provider>` as the default model and title model. Your other settings and comments stay; a backup is saved next to it. If you already have another default model, setup asks before changing it |
 
 Run setup again at any time to change the server, key, model or context.
 
@@ -197,6 +203,12 @@ Doctor checks the setup the way OpenCode will use it, and changes nothing. It sh
 Each problem comes with what to do about it. Inside OpenCode, problems appear as messages
 starting with `[gpt-oss-proxy]`: an unreadable config file, a provider that isn't set up
 yet, or a server that cuts the conversation.
+
+**The GPT-OSS model is missing from OpenCode's model list** (or OpenCode answers with
+another model): run `npm run setup` again with the same answers, then restart OpenCode (for
+OpenCode 2.x: `opencode service restart`). Setup 0.2.0 wrote the plugin as a file,
+which OpenCode 2.x skips; setup now writes the plugin folder and the provider block, which
+both versions load. `npm run doctor` names this and other causes.
 
 ### Manual setup (without `npm run setup`)
 
@@ -272,14 +284,16 @@ If you already have that file, merge the `provider` block into it; a project's o
   limit.output`, or when the provider reports an overflow. The proxy reports the
   conversation's real size for this (internal retries and trimming don't distort it). 32768
   is a safe default; hosted providers often allow 131072. Without a `limit`, OpenCode never
-  compacts on its own. With the plugin you don't need this block: it registers the
-  provider with the proxy's own window.
+  compacts on its own.
 
-Or use the plugin instead of both steps: add
-`"plugin": ["file:///ABSOLUTE/PATH/TO/gpt-oss-opencode/opencode/plugin/gpt-oss-proxy.ts"]`
-to OpenCode's config. OpenCode then starts the proxy (or reuses a running one) and
-registers the provider, using the same environment variables, `.env` and config file as
-`npm start`.
+Or let OpenCode start the proxy instead of step 1: add the plugin **folder** to OpenCode's
+config, next to the provider block:
+`"plugin": ["file:///ABSOLUTE/PATH/TO/gpt-oss-opencode/opencode/plugin"]`. OpenCode then
+starts the proxy (or uses one that is already running) with the same environment
+variables, `.env` and config file as `npm start`. Name the folder, not a file in it:
+OpenCode 2.x loads only plugin folders, and skips a file with just a warning in its log.
+OpenCode 2.x also needs the provider block; with OpenCode 1.x the plugin adds the provider
+itself if the block is missing.
 
 ## Example usage
 
@@ -855,7 +869,7 @@ has not been measured yet. Full results are in the
 ## Development
 
 ```bash
-npm test                 # 169 unit and contract tests; offline, uses the same AI SDK package as OpenCode
+npm test                 # 172 unit and contract tests; offline, uses the same AI SDK package as OpenCode
 npm run typecheck        # tsc --noEmit (TypeScript runs natively on Node; no build step)
 npm run test:live        # a real tool round trip for each configured provider (small cost)
 npm run eval -- --profile custom --concurrency 1    # live evaluation: real OpenCode + proxy + your provider, 19 scenarios

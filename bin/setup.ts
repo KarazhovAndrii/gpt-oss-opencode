@@ -17,14 +17,17 @@ import {
   applyOpenCodeChange,
   checkToolCall,
   customBaseURLs,
+  isOurPluginEntry,
   listModels,
   looksLikeGptOss,
   normalizeOpenWebUIURL,
   opencodeConfigDir,
   opencodeConfigFile,
+  opencodeVersion,
   parseContext,
   parseJsonc,
   planOpenCodeChange,
+  pluginEntryPath,
   rankModels,
   updatedProxyConfig,
   writeSecret,
@@ -518,6 +521,11 @@ function configureOpenCode(cfg: Config, profile: string, plan: OpenCodePlan) {
   }
   if (!makeDefault) info(`OpenCode keeps ${current.model} as default; pick GPT-OSS with /models or: opencode -m ${modelId}`);
   if (process.env.OPENCODE_CONFIG) note(`OPENCODE_CONFIG=${process.env.OPENCODE_CONFIG} is set; settings in that file override ${file}.`);
+  const version = opencodeVersion();
+  if (version) info(`OpenCode ${version} found (the plugin folder works with OpenCode 1.x and 2.x).`);
+  else note(`no "opencode" command found. Install OpenCode (1.14 or newer, or 2.x); this configuration works with both.`);
+  // OpenCode 2.x runs a background service that keeps the plugins it loaded.
+  if (version && Number(version.split(".")[0]) >= 2 && change.notes.length) note(`OpenCode 2.x: if it is already running, restart its background service to load the changes: opencode service restart`);
 }
 
 // ---- Doctor ----
@@ -546,30 +554,49 @@ async function doctor() {
       problems++;
     }
   }
-  const plugin = (oc.plugin ?? []).find((p: unknown) => typeof p === "string" && /opencode\/plugin\/gpt-oss-proxy\.ts$/.test(p));
-  const staticBlock = oc.provider?.[OPENCODE_PROVIDER_ID];
+  const version = opencodeVersion();
+  const major = version ? Number(version.split(".")[0]) : undefined;
+  if (version) info(`OpenCode ${version}`);
+  else note(`no "opencode" command found; install OpenCode (1.14 or newer, or 2.x). Checking its config anyway.`);
+  const entries = [oc.plugin, oc.plugins].flatMap((l) => (Array.isArray(l) ? l : [])).filter(isOurPluginEntry);
+  const block = oc.provider?.[OPENCODE_PROVIDER_ID];
   if (!fs.existsSync(ocFile)) {
     bad(`no OpenCode config at ${ocFile}; run "npm run setup".`);
     problems++;
-  } else if (plugin) {
-    const pluginPath = decodeURIComponent(new URL(plugin).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
-    if (!fs.existsSync(pluginPath)) {
-      bad(`OpenCode loads the plugin from ${pluginPath}, which does not exist (moved folder?); run "npm run setup" again.`);
-      problems++;
-    } else ok(`OpenCode starts the proxy (plugin in ${ocFile})`);
-  } else if (staticBlock) {
-    const up = await fetch(`${proxyURL(cfg).replace(/\/v1$/, "")}/health`, { signal: AbortSignal.timeout(1500) }).then((r) => r.ok).catch(() => false);
-    if (up) ok(`OpenCode uses a proxy you start yourself; it is running at ${proxyURL(cfg)}`);
-    else note(`OpenCode expects a proxy at ${staticBlock.options?.baseURL ?? proxyURL(cfg)}, which is not running: start it with "npm start" (or run setup to let OpenCode start it).`);
-    for (const [id, m] of Object.entries<any>(staticBlock.models ?? {})) {
-      const p = cfg.profiles[id];
-      if (p && isSetUp(p) && m?.limit?.context && m.limit.context !== p.contextWindow) {
-        note(`OpenCode's limit.context for ${id} is ${m.limit.context}, the proxy's window is ${p.contextWindow}: set both to the same value.`);
+  } else {
+    // The plugin (starts the proxy).
+    for (const entry of entries) {
+      const target = pluginEntryPath(entry)!;
+      if (!fs.existsSync(target)) {
+        bad(`OpenCode loads the plugin from ${target}, which does not exist (moved folder?); run "npm run setup" again.`);
+        problems++;
+      } else if (target.endsWith(".ts") && major !== 1) {
+        bad(`${ocFile} names the plugin file ${target}. OpenCode 2.x loads only plugin folders and skips it (its log says "configured plugin path must be a directory"), so the proxy never starts. Run "npm run setup": it writes the folder, which OpenCode 1.x loads too.`);
+        problems++;
+      } else ok(`OpenCode starts the proxy (plugin in ${ocFile})`);
+    }
+    if (entries.length > 1) note(`the plugin is listed ${entries.length} times; run "npm run setup" to keep one.`);
+    if (!entries.length) {
+      if (!block) {
+        bad(`OpenCode is not connected to the proxy (${ocFile} has neither the plugin nor a "${OPENCODE_PROVIDER_ID}" provider); run "npm run setup".`);
+        problems++;
+      } else {
+        const up = await fetch(`${proxyURL(cfg).replace(/\/v1$/, "")}/health`, { signal: AbortSignal.timeout(1500) }).then((r) => r.ok).catch(() => false);
+        if (up) ok(`OpenCode uses a proxy you start yourself; it is running at ${proxyURL(cfg)}`);
+        else note(`OpenCode expects a proxy at ${block.options?.baseURL ?? proxyURL(cfg)}, which is not running: start it with "npm start" (or run setup to let OpenCode start it).`);
       }
     }
-  } else {
-    bad(`OpenCode is not connected to the proxy (${ocFile} has neither the plugin nor a "${OPENCODE_PROVIDER_ID}" provider); run "npm run setup".`);
-    problems++;
+    // The provider (lists the model). OpenCode 1.x plugins can add it; 2.x needs the block.
+    if (!block && entries.length && major !== 1) {
+      bad(`${ocFile} has no "${OPENCODE_PROVIDER_ID}" provider block. OpenCode 2.x needs it to list the model (otherwise: "Model unavailable: ${OPENCODE_PROVIDER_ID}/..."); run "npm run setup".`);
+      problems++;
+    }
+    for (const [id, m] of Object.entries<any>(block?.models ?? {})) {
+      const p = cfg.profiles[id];
+      if (p && isSetUp(p) && m?.limit?.context && m.limit.context !== p.contextWindow) {
+        note(`OpenCode's limit.context for ${id} is ${m.limit.context}, the proxy's window is ${p.contextWindow}: run "npm run setup" (or set both to the same value).`);
+      }
+    }
   }
   const ocModel = String(oc.model ?? "");
   const profileName = ocModel.startsWith(`${OPENCODE_PROVIDER_ID}/`) ? ocModel.slice(OPENCODE_PROVIDER_ID.length + 1) : cfg.defaultProfile;

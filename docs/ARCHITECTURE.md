@@ -52,13 +52,21 @@ Why a proxy rather than an OpenCode plugin: the incompatibility is in the
 provider transport (how tool calls are encoded), which plugins cannot change;
 a proxy is also testable in isolation with the same AI SDK package OpenCode
 uses, works with any OpenCode UI (TUI, `run`, server), and switching providers
-is configuration only. The plugin (`opencode/plugin/gpt-oss-proxy.ts`, set up by
-`npm run setup`) hosts the proxy inside OpenCode's process and registers the `gpt-oss`
-provider through OpenCode's `config` hook, with one model per set-up profile and
-`limit.context` taken from the proxy's `contextWindow`, so the window lives in one place.
-If another window's proxy already serves the port it is used; the `chat.params` hook
-starts this window's own before the next model call if that one has gone. A config file
-that does not load still starts a proxy, which answers every request with the error.
+is configuration only. The plugin (`opencode/plugin/`, set up by `npm run setup`) hosts
+the proxy inside OpenCode's process. One module serves both OpenCode generations: its
+default export is `{ id, server, setup }`. OpenCode 1.x calls `server` and gets hooks:
+`config` registers the `gpt-oss` provider (one model per set-up profile, `limit.context`
+from the proxy's `contextWindow`), and `chat.params` restarts this process's proxy before
+a model call if the one it relied on (another window) has gone. OpenCode 2.x calls `setup`
+and the returned cleanup. It loads plugins only from a folder (a file entry is skipped with
+a log warning), and its plugins cannot add providers. So setup names the folder, which
+1.x also loads through its `index.ts`, and writes the `gpt-oss` provider block, which
+2.x migrates from the 1.x format. Limits come from the proxy config in both.
+2.x's background service sets plugins up per project folder; those setups share one proxy
+per process with a reference count, and a 15-second check takes the port over when
+another process stops serving it. Verified with OpenCode 1.14, 1.17, 1.18 and 2.0. A
+config file that does not load still starts a proxy, which answers every request with the
+error.
 
 ### Provider profiles
 
@@ -239,7 +247,7 @@ validation, bounded recovery and observability.
 | `src/opencode.ts` | OpenCode's `gpt-oss` provider block derived from the proxy config (plugin, `--no-plugin` setup, shipped example) |
 | `src/setup.ts`, `bin/setup.ts` | `npm run setup` / `npm run doctor`: model listing with actionable errors, a tool-call check through an in-process proxy, config + key file, comment-preserving edits of OpenCode's JSONC config |
 | `src/log.ts`, `src/sessionreport.ts`, `bin/report.ts` | JSONL diagnostics (metadata only unless `logContent`; day folders pruned after `logRetentionDays`) and the session report tool |
-| `opencode/` | OpenCode plugin (runs the proxy, registers the provider), config example for running the proxy separately, optional `repo_overview` tool |
+| `opencode/` | OpenCode plugin folder for 1.x and 2.x (runs the proxy; registers the provider on 1.x), config example for running the proxy separately, optional `repo_overview` tool |
 | `eval/` | live evaluation harness (`run.ts`; `--shell` picks bash, Windows PowerShell 5.1 or pwsh), scenarios, synthetic fixture repos, `generators/` for large inputs made per run, `recheck.ts`/`compare.ts` |
 | `scripts/` | provider probes, request replay, OpenWebUI wire probe, local OpenWebUI + Ollama stack |
 | `test/` | unit + contract tests (mock provider, AI SDK client) |

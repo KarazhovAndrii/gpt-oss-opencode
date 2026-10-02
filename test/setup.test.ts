@@ -14,6 +14,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadConfig } from "../src/config.ts";
 import {
   customBaseURLs,
+  isOurPluginEntry,
   listModels,
   normalizeOpenWebUIURL,
   parseContext,
@@ -89,17 +90,44 @@ test("the proxy config: this profile is replaced, everything else kept; numCtx o
   assert.deepEqual(fixed.profiles.openwebui, { baseURL: "http://s/api", model: "m", contextWindow: 65536 });
 });
 
-test("OpenCode changes: plugin from any older clone replaced, static block removed, default model optional", () => {
+test("plugin entries of this project are recognised in every form, from any clone", () => {
+  const here = fileURLToPath(new URL("../opencode/plugin", import.meta.url));
+  for (const e of [
+    pathToFileURL(here).href,
+    here,
+    pathToFileURL(path.join(here, "gpt-oss-proxy.ts")).href,
+    pathToFileURL(path.join(here, "index.ts")).href,
+    "file:///C:/gone/gpt-oss-opencode/opencode/plugin/gpt-oss-proxy.ts",
+    "C:\\gone\\gpt-oss-opencode\\opencode\\plugin",
+  ]) assert.ok(isOurPluginEntry(e), e);
+  for (const e of ["some-plugin", "@scope/plugin", ["pkg", {}], "file:///C:/x/opencode/plugins/other.ts"]) assert.ok(!isOurPluginEntry(e), JSON.stringify(e));
+  // a folder named opencode/plugin that is someone else's plugin
+  const other = path.join(tmp(), "opencode", "plugin");
+  fs.mkdirSync(other, { recursive: true });
+  assert.ok(!isOurPluginEntry(other));
+});
+
+test("OpenCode changes: the plugin folder replaces file entries from any clone; the provider block matches the proxy", () => {
   const cfg = loadConfig({ OPENWEBUI_BASE_URL: "http://gpu:8080/api", OPENWEBUI_NUM_CTX: "65536" }, tmp());
   const current = {
     model: "anthropic/x",
     plugin: ["some-plugin", "file:///C:/old/gpt-oss-opencode/opencode/plugin/gpt-oss-proxy.ts"],
-    provider: { other: { npm: "x" }, "gpt-oss": { models: { openwebui: { limit: { context: 32768 } } } } },
+    provider: { "gpt-oss": { models: { openwebui: { limit: { context: 32768 } } } }, other: { npm: "x" } },
   };
-  const plan = planOpenCodeChange(current, { cfg, profile: "openwebui", plugin: true, makeDefault: false, pluginFile: "/repo/opencode/plugin/gpt-oss-proxy.ts" });
-  assert.deepEqual(plan.set.plugin, ["some-plugin", pathToFileURL("/repo/opencode/plugin/gpt-oss-proxy.ts").href]);
-  assert.deepEqual(plan.set.provider, { other: { npm: "x" } });
+  const plan = planOpenCodeChange(current, { cfg, profile: "openwebui", plugin: true, makeDefault: false, pluginDir: "/repo/opencode/plugin" });
+  assert.deepEqual(plan.set.plugin, ["some-plugin", pathToFileURL("/repo/opencode/plugin").href], "OpenCode 2.x loads only plugin folders; 1.x loads them too");
+  assert.deepEqual(Object.keys(plan.set.provider as object), ["gpt-oss", "other"]);
+  assert.deepEqual((plan.set.provider as any)["gpt-oss"].models.openwebui.limit, { context: 65536, output: 8192 }, "OpenCode 2.x needs the block; limits from the proxy");
   assert.equal(plan.set.model, undefined, "the user's default model is kept");
+  // a 2.x-style config: the entry goes to "plugins", old entries leave both lists
+  const v2 = planOpenCodeChange({ plugins: ["x"], plugin: [] }, { cfg, profile: "openwebui", plugin: true, makeDefault: false, pluginDir: "/repo/opencode/plugin" });
+  assert.deepEqual(v2.set.plugin, [pathToFileURL("/repo/opencode/plugin").href], "both lists exist: the 1.x name, read by 2.x too");
+  const native = planOpenCodeChange({ plugins: ["x", "file:///C:/old/gpt-oss-opencode/opencode/plugin/index.ts"] }, { cfg, profile: "openwebui", plugin: true, makeDefault: false, pluginDir: "/repo/opencode/plugin" });
+  assert.deepEqual(native.set.plugins, ["x", pathToFileURL("/repo/opencode/plugin").href]);
+  assert.equal(native.set.plugin, undefined);
+  // nothing to do the second time
+  const again = planOpenCodeChange({ ...current, ...plan.set }, { cfg, profile: "openwebui", plugin: true, makeDefault: false, pluginDir: "/repo/opencode/plugin" });
+  assert.deepEqual(again.set, {});
   const both = planOpenCodeChange({}, { cfg, profile: "openwebui", plugin: false, makeDefault: true });
   assert.equal(both.set.model, "gpt-oss/openwebui");
   assert.equal(both.set.small_model, "gpt-oss/openwebui", "titles stay on the same server");
@@ -135,7 +163,8 @@ test("model listing explains failures in words a user can act on", async () => {
 
 function runSetup(box: string, args: string[], input?: string): Promise<{ code: number | null; out: string }> {
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(OPENWEBUI|CUSTOM|SILICONFLOW|GPT_OSS|OPENCODE)_/.test(k)));
-  Object.assign(env, { GPT_OSS_CONFIG: path.join(box, "proxy", "gpt-oss-proxy.config.json"), XDG_CONFIG_HOME: path.join(box, "xdg"), NO_COLOR: "1" });
+  // No real OpenCode: its version is only reported.
+  Object.assign(env, { GPT_OSS_CONFIG: path.join(box, "proxy", "gpt-oss-proxy.config.json"), XDG_CONFIG_HOME: path.join(box, "xdg"), NO_COLOR: "1", OPENCODE_BIN: path.join(box, "no-opencode.exe") });
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [SETUP, ...args], { env, stdio: ["pipe", "pipe", "pipe"] });
     let out = "";
@@ -180,7 +209,8 @@ describe("npm run setup / doctor", () => {
     assert.equal(oc.model, "gpt-oss/openwebui");
     assert.equal(oc.small_model, "gpt-oss/openwebui");
     assert.equal(oc.plugin.length, 1);
-    assert.ok(fs.existsSync(fileURLToPath(oc.plugin[0])), "the plugin path exists");
+    assert.ok(fs.statSync(fileURLToPath(oc.plugin[0])).isDirectory(), "the plugin folder (OpenCode 2.x loads only folders)");
+    assert.deepEqual(oc.provider["gpt-oss"].models.openwebui.limit, { context: 65536, output: 8192 }, "the provider block OpenCode 2.x needs");
     // what the plugin will load from these files
     const cfg = loadConfig({ GPT_OSS_CONFIG: path.join(box, "proxy", "gpt-oss-proxy.config.json") }, box);
     assert.deepEqual([cfg.defaultProfile, cfg.profiles.openwebui.contextWindow, cfg.profiles.openwebui.numCtx], ["openwebui", 65536, 65536]);
@@ -206,12 +236,13 @@ describe("npm run setup / doctor", () => {
     const r = await runSetup(box, [], `1\n${owui.url}\nsk-wrong\nsk-good\n1\n32768\nn\n`);
     assert.equal(r.code, 0, r.out);
     assert.match(r.out, /failed {2}The server rejected the API key/);
-    assert.match(r.out, /removed the static block/);
+    assert.match(r.out, /provider "gpt-oss": openwebui \(context 32768\)/);
     const text = fs.readFileSync(jsonc, "utf8");
     assert.match(text, /\/\/ my main model\n  "model": "anthropic\/x",/, "default model kept, comment kept");
     assert.match(text, /"theme": "tokyonight", \/\/ keep me/);
     const oc = parseJsonc(text);
-    assert.deepEqual(Object.keys(oc.provider), ["other"]);
+    assert.deepEqual(Object.keys(oc.provider), ["gpt-oss", "other"]);
+    assert.equal(oc.provider["gpt-oss"].models.openwebui.limit.context, 32768, "the old block now matches the proxy");
     assert.equal(oc.small_model, undefined);
     assert.equal(oc.plugin.length, 1);
     assert.equal(fs.readdirSync(path.dirname(jsonc)).filter((f) => f.startsWith("opencode.jsonc.bak-")).length, 1, "backup kept");
@@ -245,5 +276,11 @@ describe("npm run setup / doctor", () => {
     const moved = await runSetup(box, ["--doctor"]);
     assert.match(moved.out, /does not exist \(moved folder\?\)/);
     assert.match(moved.out, /not set up yet .*npm run setup/);
+    // an entry written by setup up to 0.2.0: OpenCode 2.x skips plugin files
+    const legacy = pathToFileURL(fileURLToPath(new URL("../opencode/plugin/gpt-oss-proxy.ts", import.meta.url))).href;
+    fs.writeFileSync(path.join(box, "xdg", "opencode", "opencode.json"), JSON.stringify({ plugin: [legacy], model: "gpt-oss/openwebui" }));
+    const file = await runSetup(box, ["--doctor"]);
+    assert.match(file.out, /OpenCode 2\.x loads only plugin folders and skips it/);
+    assert.match(file.out, /no "gpt-oss" provider block\. OpenCode 2\.x needs it/);
   });
 });

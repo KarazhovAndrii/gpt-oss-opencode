@@ -30,7 +30,7 @@ parser, validation/schema, guard, context guard, emitter, logging), `bin/` CLIs,
 offline tests (+ `test/live/`), `eval/` harness + scenarios + `fixtures/` synthetic repos
 (copied to `.eval-runs/` per run — never run agents inside the source tree) + `hidden/`
 acceptance tests the agent never sees (`cpp-evaluator` compiles one via `eval/lib/cxx.ts`:
-g++/clang++/MSVC through vswhere), `opencode/` plugin (runs the proxy in OpenCode, registers the provider from the proxy config), config example and optional custom tool, `scripts/` provider probes.
+g++/clang++/MSVC through vswhere), `opencode/` plugin folder for OpenCode 1.x and 2.x (`index.ts` default-exports `{ id, server, setup }`; runs the proxy in OpenCode; 2.x needs the provider block setup writes), config example and optional custom tool, `scripts/` provider probes.
 
 ## Conventions
 

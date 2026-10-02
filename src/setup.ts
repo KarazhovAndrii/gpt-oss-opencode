@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Config } from "./config.ts";
@@ -372,9 +373,48 @@ export function opencodeConfigFile(dir: string): string {
   return path.join(dir, "opencode.json");
 }
 
+/** The version of the OpenCode on PATH (or OPENCODE_BIN), e.g. "2.0.22"; undefined if none answers. */
+export function opencodeVersion(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  try {
+    const bin = env.OPENCODE_BIN || "opencode";
+    // npm installs it as a .cmd shim on Windows, which only a shell runs.
+    const r = spawnSync(bin, ["--version"], { encoding: "utf8", timeout: 20_000, shell: process.platform === "win32", windowsHide: true, env });
+    return /(\d+\.\d+\.\d+)/.exec(`${r.stdout ?? ""}${r.stderr ?? ""}`)?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
 /** The repository root, where the config file, key files and .env live. */
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-export const PLUGIN_FILE = path.join(ROOT, "opencode", "plugin", "gpt-oss-proxy.ts");
+/**
+ * The plugin folder. OpenCode 2.x loads plugins only from a folder (a file entry is skipped
+ * with a log warning), and OpenCode 1.x loads the folder's index.ts too, so the config names
+ * the folder.
+ */
+export const PLUGIN_DIR = path.join(ROOT, "opencode", "plugin");
+
+/** The local path a plugin config entry points at (file URL or path); undefined for packages. */
+export function pluginEntryPath(entry: unknown): string | undefined {
+  const spec = typeof entry === "string" ? entry : Array.isArray(entry) ? entry[0] : (entry as any)?.package;
+  if (typeof spec !== "string") return undefined;
+  if (spec.startsWith("file://")) {
+    try {
+      return fileURLToPath(spec);
+    } catch {
+      return undefined;
+    }
+  }
+  return path.isAbsolute(spec) || /^[A-Za-z]:[\\/]/.test(spec) ? spec : undefined;
+}
+
+/** An entry for this project's plugin, from any clone: the folder, or a file in it. Gone clones count. */
+export function isOurPluginEntry(entry: unknown): boolean {
+  const p = pluginEntryPath(entry)?.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (!p || !/\/opencode\/plugin(\/(gpt-oss-proxy|index)\.ts)?$/.test(p)) return false;
+  const folder = p.endsWith(".ts") ? path.dirname(p) : p;
+  return !fs.existsSync(folder) || fs.existsSync(path.join(folder, "gpt-oss-proxy.ts"));
+}
 
 export interface OpenCodeChange {
   /** Top-level keys to set, with their new values. */
@@ -384,31 +424,30 @@ export interface OpenCodeChange {
 }
 
 /**
- * What to change in OpenCode's config: the plugin (or, without it, a static provider block),
- * and the default model. `makeDefault` false keeps the user's current default model.
+ * What to change in OpenCode's config: the plugin folder (unless `plugin` is false), the
+ * `gpt-oss` provider block, and the default model (`makeDefault` false keeps the user's).
  */
-export function planOpenCodeChange(current: any, opts: { cfg: Config; profile: string; plugin: boolean; makeDefault: boolean; pluginFile?: string }): OpenCodeChange {
+export function planOpenCodeChange(current: any, opts: { cfg: Config; profile: string; plugin: boolean; makeDefault: boolean; pluginDir?: string }): OpenCodeChange {
   const set: Record<string, unknown> = {};
   const notes: string[] = [];
   const modelId = `${OPENCODE_PROVIDER_ID}/${opts.profile}`;
   if (opts.plugin) {
-    const url = pathToFileURL(opts.pluginFile ?? PLUGIN_FILE).href;
-    const plugins: unknown[] = Array.isArray(current.plugin) ? current.plugin : [];
-    const others = plugins.filter((p) => !(typeof p === "string" && /opencode\/plugin\/gpt-oss-proxy\.ts$/.test(p)));
-    const next = [...others, url];
-    if (JSON.stringify(next) !== JSON.stringify(plugins)) {
-      set.plugin = next;
-      notes.push(`plugin: ${url} (OpenCode starts the proxy itself)`);
+    const entry = pathToFileURL(opts.pluginDir ?? PLUGIN_DIR).href;
+    // OpenCode 2.x reads both its "plugins" and 1.x's "plugin"; keep to the one the file uses.
+    const key = Array.isArray(current.plugins) && !Array.isArray(current.plugin) ? "plugins" : "plugin";
+    for (const k of ["plugin", "plugins"]) {
+      if (!Array.isArray(current[k])) continue;
+      const kept = current[k].filter((e: unknown) => !isOurPluginEntry(e));
+      const next = k === key ? [...kept, entry] : kept;
+      if (JSON.stringify(next) !== JSON.stringify(current[k])) set[k] = next;
     }
-    // The plugin registers the provider with limits from the proxy config; an old static
-    // block would override them.
-    if (current.provider?.[OPENCODE_PROVIDER_ID]) {
-      const { [OPENCODE_PROVIDER_ID]: _old, ...rest } = current.provider;
-      set.provider = rest;
-      notes.push(`provider "${OPENCODE_PROVIDER_ID}": removed the static block (the plugin now registers it, with limits that match the proxy)`);
-    }
-  } else {
-    const provider = opencodeProvider(opts.cfg, { token: process.env.GPT_OSS_PROXY_TOKEN });
+    if (!Array.isArray(current[key])) set[key] = [entry];
+    if (set[key]) notes.push(`${key}: ${entry} (OpenCode 1.x and 2.x start the proxy from this folder)`);
+  }
+  // OpenCode 2.x needs this block (its plugins do not add providers), and with it the model
+  // is listed even when a plugin fails to load. Limits come from the proxy config.
+  const provider = opencodeProvider(opts.cfg, { token: process.env.GPT_OSS_PROXY_TOKEN });
+  if (JSON.stringify(current.provider?.[OPENCODE_PROVIDER_ID]) !== JSON.stringify(provider)) {
     set.provider = { ...(current.provider ?? {}), [OPENCODE_PROVIDER_ID]: provider };
     notes.push(`provider "${OPENCODE_PROVIDER_ID}": ${Object.keys(provider.models).map((m) => `${m} (context ${(provider.models[m] as any).limit.context})`).join(", ")}`);
   }
