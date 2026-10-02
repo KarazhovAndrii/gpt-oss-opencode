@@ -11,12 +11,12 @@ import { afterCompaction, currentObjective, estimateTokens, findWorkingDirectory
 import { resolveTarget } from "./openwebui.ts";
 import type { ToolDef } from "./harmony.ts";
 import { interpretHarmony, stripHarmonyTokens } from "./harmony.ts";
-import { validateToolCall, type ValidCall } from "./toolcall.ts";
+import { recoverUnparsedCall, validateToolCall, type ValidCall } from "./toolcall.ts";
 import { analyzeTurn, canonicalKey, findRedundant, redundantHint, isErrorResult, type Step } from "./guard.ts";
 import { adapterFor, type Adapter } from "./strategies.ts";
 import { compactTools } from "./compact.ts";
 import { detectShell, powershell51Feedback, powershell51Problems } from "./shell.ts";
-import { addUsage, callModel, costUSD, UpstreamError, type Usage } from "./upstream.ts";
+import { addUsage, callModel, costUSD, UpstreamError, type UpstreamResult, type Usage } from "./upstream.ts";
 import type { ChatEmitter } from "./emitter.ts";
 import type { Logger } from "./log.ts";
 import { hashOf, logArgs, logText, truncate } from "./log.ts";
@@ -293,6 +293,34 @@ export async function runChat(req: ChatRequest, ctx: RunContext): Promise<Outcom
   // Calls accepted earlier in this same response also count for redundancy checks.
   const steps: Step[] = [...analysis.steps];
 
+  const upstreamFailure = (err: UpstreamError): Outcome => {
+    if (err.kind === "tool_parse") {
+      return stop(`The model produced an invalid tool call ${repairs + 1} times in a row and was stopped. Last problem: the model server could not parse its arguments (${truncate(err.message, 300)}). Send a follow-up message, for example "continue", to retry.`, "upstream_tool_parse");
+    }
+    const owui = profile.kind === "openwebui";
+    const hint =
+      err.kind === "tools_unsupported"
+        ? ` This provider does not support native tool calling for ${profile.model}; set "strategy": "harmony" (or "auto") for profile "${profile.name}".`
+        : err.kind === "auth" && owui
+        ? ` Check ${profile.apiKeyEnv ?? "the API key"} for profile "${profile.name}". In OpenWebUI: enable API keys (Admin Panel > Settings > General, or ENABLE_API_KEYS=True), give the key's user the API-keys permission, and if API-key endpoint restrictions are on allow /api/models, /api/chat/completions and /ollama/v1/chat/completions.`
+        : err.kind === "auth"
+        ? ` Check the API key environment variable ${profile.apiKeyEnv ?? "(apiKeyEnv)"} for profile "${profile.name}".`
+        : owui && /not found/i.test(err.message)
+        ? ` The model id "${profile.model}" must match an OpenWebUI model id exactly (see /api/models) and the key's user must have access to it.`
+        : err.kind === "context_length"
+          ? " The conversation is too long for the model; run /compact in OpenCode or start a new session."
+          : err.kind === "timeout"
+            ? " The provider did not respond in time; limits can be raised in gpt-oss-proxy.config.json (limits.requestTimeoutMs, firstByteTimeoutMs, idleTimeoutMs)."
+            : "";
+    // An overflow goes to OpenCode as an error it compacts the session on (server.ts); the text
+    // is the fallback once the stream has started. Right after a compaction it would only make
+    // OpenCode compact and retry in a loop (observed), so the turn ends with the text instead.
+    const compacted = afterCompaction(messages) && !analysis.steps.length;
+    const overflow = err.kind === "context_length" && !compacted ? diagnostic(`context_length_exceeded: provider "${profile.name}" rejected the request as longer than the model's context window (${err.message})`) : undefined;
+    const why = err.kind === "context_length" && compacted ? ` The request still does not fit right after OpenCode compacted the conversation, so the provider's real context window is probably smaller than configured: check limit.context in opencode.json and ${envPrefix(profile)}_CONTEXT_WINDOW, or the provider's output limit (maxOutputTokens).` : hint;
+    return stop(`Model provider "${profile.name}" failed after ${err.attempts} attempt(s): ${err.message}.${why}`, `upstream_${err.kind}`, overflow);
+  };
+
   for (let iteration = 0; iteration < 12; iteration++) {
     if (ctx.signal.aborted) return finish({ finish: "stop", calls: [], text: "", diagnostic: "client_aborted" });
     if (Date.now() > deadline - 2000) {
@@ -305,7 +333,7 @@ export async function runChat(req: ChatRequest, ctx: RunContext): Promise<Outcom
     );
     if (process.env.GPT_OSS_DUMP_REQUESTS) logger.dump(session, `${reqId}-${iteration}`, { profile: profile.name, tools, body });
 
-    let result;
+    let result: UpstreamResult;
     const callStart = Date.now();
     let reasoningStarted = false;
     try {
@@ -339,35 +367,21 @@ export async function runChat(req: ChatRequest, ctx: RunContext): Promise<Outcom
         continue;
       }
       if (err.kind === "aborted") return finish({ finish: "stop", calls: [], text: "", diagnostic: "client_aborted" });
-      if (err.kind === "tool_parse" && repairs < limits.repairAttempts) {
-        // The model server could not parse the model's tool-call arguments: ask the model to resend them.
+      // The model server could not parse the model's tool call. Its arguments are often valid JSON
+      // behind reasoning the model wrote into the call: use them, shown as reasoning.
+      const recovered = err.kind === "tool_parse" ? recoverUnparsedCall(err.message, tools) : undefined;
+      if (recovered) {
+        logger.event(session, "call_repaired", { req: reqId, tool: recovered.name, repairs: [`recovered from the model server's parse error (${recovered.dropped.length} chars of text around the JSON arguments dropped)`] });
+        result = { content: "", reasoning: recovered.dropped, toolCalls: [{ name: recovered.name, arguments: recovered.args }], finishReason: "tool_calls", ms: Date.now() - callStart, attempts: err.attempts };
+      } else if (err.kind === "tool_parse" && repairs < limits.repairAttempts) {
+        // Nothing usable: ask the model to resend the call.
         repairs++;
         logger.event(session, "validation_failure", { req: reqId, code: "bad_json", tool: "(server-side parse)", error: err.message, attempt: repairs });
         adapter.nudge(extra, `Your previous function call could not be parsed (${truncate(err.message, 400)}). Call the function again with arguments that are one valid JSON object.`);
         continue;
+      } else {
+        return upstreamFailure(err);
       }
-      const owui = profile.kind === "openwebui";
-      const hint =
-        err.kind === "tools_unsupported"
-          ? ` This provider does not support native tool calling for ${profile.model}; set "strategy": "harmony" (or "auto") for profile "${profile.name}".`
-          : err.kind === "auth" && owui
-          ? ` Check ${profile.apiKeyEnv ?? "the API key"} for profile "${profile.name}". In OpenWebUI: enable API keys (Admin Panel > Settings > General, or ENABLE_API_KEYS=True), give the key's user the API-keys permission, and if API-key endpoint restrictions are on allow /api/models, /api/chat/completions and /ollama/v1/chat/completions.`
-          : err.kind === "auth"
-          ? ` Check the API key environment variable ${profile.apiKeyEnv ?? "(apiKeyEnv)"} for profile "${profile.name}".`
-          : owui && /not found/i.test(err.message)
-          ? ` The model id "${profile.model}" must match an OpenWebUI model id exactly (see /api/models) and the key's user must have access to it.`
-          : err.kind === "context_length"
-            ? " The conversation is too long for the model; run /compact in OpenCode or start a new session."
-            : err.kind === "timeout"
-              ? " The provider did not respond in time; limits can be raised in gpt-oss-proxy.config.json (limits.requestTimeoutMs, firstByteTimeoutMs, idleTimeoutMs)."
-              : "";
-      // An overflow goes to OpenCode as an error it compacts the session on (server.ts); the text
-      // is the fallback once the stream has started. Right after a compaction it would only make
-      // OpenCode compact and retry in a loop (observed), so the turn ends with the text instead.
-      const compacted = afterCompaction(messages) && !analysis.steps.length;
-      const overflow = err.kind === "context_length" && !compacted ? diagnostic(`context_length_exceeded: provider "${profile.name}" rejected the request as longer than the model's context window (${err.message})`) : undefined;
-      const why = err.kind === "context_length" && compacted ? ` The request still does not fit right after OpenCode compacted the conversation, so the provider's real context window is probably smaller than configured: check limit.context in opencode.json and ${envPrefix(profile)}_CONTEXT_WINDOW, or the provider's output limit (maxOutputTokens).` : hint;
-      return stop(`Model provider "${profile.name}" failed after ${err.attempts} attempt(s): ${err.message}.${why}`, `upstream_${err.kind}`, overflow);
     }
     if (profile.strategy === "auto" && adapter.name === "native" && tools.length) nativeSupport.set(profile.name, true);
     usage = addUsage(usage, result.usage);

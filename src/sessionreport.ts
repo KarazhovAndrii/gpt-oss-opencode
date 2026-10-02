@@ -32,7 +32,8 @@ export function analyze(ev: any[]) {
   if (shellMis.length)
     flags.push({ severity: "medium", message: `${shellMis.length} bash command(s) in bash/cmd.exe syntax for Windows PowerShell 5.1 (${shellMis.filter((s) => s.action === "reprompt").length} sent back with a fix, ${shellMis.filter((s) => s.action === "passthrough").length} run as written): ${[...new Set(shellMis.flatMap((s) => s.found ?? []))].join(", ")}` });
   // "aborted" = OpenCode closed the request (e.g. its title request when a run ends): not a provider problem.
-  const upErr = ev.filter((e) => e.type === "upstream_error" && e.kind !== "aborted");
+  // "tool_parse" = the model wrote an unparseable call: counted above as an invalid call, or recovered.
+  const upErr = ev.filter((e) => e.type === "upstream_error" && e.kind !== "aborted" && e.kind !== "tool_parse");
   if (upErr.length) {
     const kinds: Record<string, number> = {};
     for (const u of upErr) kinds[u.kind] = (kinds[u.kind] ?? 0) + 1;

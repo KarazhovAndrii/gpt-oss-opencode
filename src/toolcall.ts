@@ -125,7 +125,11 @@ export function validateToolCall(p: ProposedCall, tools: ToolDef[], cwd?: string
   }
   const nameFilter = NAME_FILTERS[tool.function.name];
   const word = nameFilter ? finalArgs[nameFilter] : undefined;
-  if (typeof word === "string" && BARE_WORD.test(word.trim())) {
+  const joined = typeof word === "string" ? joinGlobList(word) : undefined;
+  if (joined) {
+    finalArgs[nameFilter] = joined;
+    repairs.push(`glob list ${nameFilter} ${JSON.stringify(word)} -> ${JSON.stringify(joined)}`);
+  } else if (typeof word === "string" && BARE_WORD.test(word.trim())) {
     const pattern = `*${word.trim().split(/\s+/).join("*")}*`;
     finalArgs[nameFilter] = pattern;
     repairs.push(`bare-word ${nameFilter} ${JSON.stringify(word)} -> ${JSON.stringify(pattern)}`);
@@ -184,6 +188,101 @@ export function resolveTool(name: string, tools: ToolDef[]): ToolDef | undefined
 
 function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/**
+ * Rewrites a comma-separated list of file patterns ("**\/*.ts,**\/*.tsx") as one glob. OpenCode
+ * hands the filter to ripgrep as a single --glob, where a comma outside braces is a literal
+ * character, so the list matches no file (observed: every grep of a session found nothing).
+ * Extensions become "*.{ts,tsx}" (the form OpenCode's description shows); anything else becomes
+ * "{a,b}", with slashless entries prefixed "**\/" because ripgrep anchors the whole alternation at
+ * the root once one entry contains a slash (verified with ripgrep 15.1).
+ */
+export function joinGlobList(pattern: string): string | undefined {
+  const parts = splitTopLevelCommas(pattern).map((s) => s.trim()).filter(Boolean);
+  if (parts.length < 2 || !parts.some((p) => /[*?./]/.test(p))) return undefined;
+  // ripgrep allows no nested braces: "*.{h,cpp},*.ts" -> "*.h", "*.cpp", "*.ts".
+  const alts = [...new Set(parts.flatMap(expandBraces))];
+  const exts = alts.map((a) => /^(?:\*\*\/)?\*\.([\w+-]+)$/.exec(a)?.[1]);
+  if (exts.every(Boolean)) return `*.{${[...new Set(exts)].join(",")}}`;
+  const anchored = alts.some((a) => a.includes("/"));
+  return `{${alts.map((a) => (anchored && !a.includes("/") ? `**/${a}` : a)).join(",")}}`;
+}
+
+function splitTopLevelCommas(s: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "{" || c === "[") depth++;
+    else if ((c === "}" || c === "]") && depth > 0) depth--;
+    else if (c === "," && depth === 0) {
+      out.push(s.slice(start, i));
+      start = i + 1;
+    }
+  }
+  out.push(s.slice(start));
+  return out;
+}
+
+function expandBraces(p: string): string[] {
+  const m = /\{([^{}]*)\}/.exec(p);
+  if (!m) return [p];
+  return m[1].split(",").flatMap((alt) => expandBraces(p.slice(0, m.index) + alt + p.slice(m.index + m[0].length)));
+}
+
+/**
+ * The tool a set of arguments was meant for when its name is lost: every required parameter is
+ * present, most argument names are its parameters, and it knows more of them than any other tool.
+ * Undefined when that is ambiguous ({"pattern": "*.py"} fits glob and grep alike).
+ */
+export function inferTool(args: Record<string, unknown>, tools: ToolDef[]): ToolDef | undefined {
+  const keys = Object.keys(args);
+  let best: ToolDef | undefined;
+  let bestKnown = 0;
+  let tie = false;
+  for (const t of tools) {
+    const props = t.function.parameters?.properties ?? {};
+    const required: string[] = t.function.parameters?.required ?? [];
+    if (!required.every((k) => k in args)) continue;
+    const known = keys.filter((k) => k in props).length;
+    if (known > bestKnown) [best, bestKnown, tie] = [t, known, false];
+    else if (known === bestKnown && known > 0) tie = true;
+  }
+  return best && !tie && bestKnown * 2 > keys.length ? best : undefined;
+}
+
+/**
+ * Recovers the call from Ollama's "error parsing tool call: raw='...', err=..." (a 400 for the
+ * whole request). gpt-oss sometimes writes its reasoning into the call ahead of valid JSON
+ * arguments (observed: raw='We need to analyze ... Use grep for 'class' in project.{"pattern":...}').
+ * The error carries the arguments but not the tool name, so the tool is inferred from the
+ * argument names. Undefined unless the text holds exactly one JSON object and one tool fits it.
+ */
+export function recoverUnparsedCall(message: string, tools: ToolDef[]): { name: string; args: string; dropped: string } | undefined {
+  const raw = /error parsing tool call: raw='([\s\S]*)', err=/.exec(message)?.[1];
+  if (!raw) return undefined;
+  const found: { value: Record<string, unknown>; span: string; start: number }[] = [];
+  for (let i = raw.indexOf("{"); i >= 0 && found.length < 2; i = raw.indexOf("{", i + 1)) {
+    const span = extractBalancedObject(raw.slice(i));
+    if (!span) continue;
+    try {
+      const value = JSON.parse(span);
+      if (!isObj(value)) continue;
+      found.push({ value, span, start: i });
+      i += span.length - 1;
+    } catch {
+      // a brace in the prose, not the arguments
+    }
+  }
+  if (found.length !== 1) return undefined;
+  const { value, span, start } = found[0];
+  // {"name": "grep", "arguments": {...}} names its tool (validateToolCall unwraps it).
+  const named = typeof value.name === "string" && "arguments" in value ? resolveTool(value.name, tools) : undefined;
+  const tool = named ?? inferTool(value, tools);
+  if (!tool) return undefined;
+  return { name: tool.function.name, args: span, dropped: (raw.slice(0, start) + raw.slice(start + span.length)).trim() };
 }
 
 /**

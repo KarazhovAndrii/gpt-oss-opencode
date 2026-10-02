@@ -167,6 +167,41 @@ describe("OpenWebUI profile", () => {
     }
   });
 
+  test("Ollama 'error parsing tool call' with valid JSON behind the model's reasoning: the call is recovered, no second request", async () => {
+    // Observed with OpenCode 2.x: reasoning written into the call ahead of complete arguments.
+    up.setModels([{ id: MODEL, owned_by: "ollama" }]);
+    const raw = `We need the entry point. Use grep for 'def main' in the sources.{"pattern":"def main","include":"**/*.py,**/*.pyi"}`;
+    up.push({ kind: "status", status: 400, body: JSON.stringify({ detail: `error parsing tool call: raw='${raw}', err=invalid character 'W' looking for beginning of value` }) });
+    const px = await proxy();
+    try {
+      const r = await chat(px.url, base());
+      const [call] = calls(r.events);
+      assert.equal(call.function.name, "grep");
+      assert.deepEqual(JSON.parse(call.function.arguments), { pattern: "def main", include: "*.{py,pyi}" });
+      assert.equal(up.requests.length, 1);
+      const reasoning = r.events.map((e) => e.choices?.[0]?.delta?.reasoning_content ?? "").join("");
+      assert.match(reasoning, /We need the entry point\. Use grep for 'def main' in the sources\./, "the dropped text is shown as reasoning");
+      assert.ok(!px.events().some((e) => e.type === "guard_stop"));
+    } finally {
+      await px.close();
+    }
+  });
+
+  test("Ollama 'error parsing tool call' every time: the turn stops with a model-side explanation, not a provider failure", async () => {
+    up.setModels([{ id: MODEL, owned_by: "ollama" }]);
+    const bad = { kind: "status" as const, status: 400, body: JSON.stringify({ detail: `error parsing tool call: raw='{"pattern":???}', err=invalid character '?' looking for beginning of value` }) };
+    up.push(bad, bad, bad);
+    const px = await proxy();
+    try {
+      const r = await chat(px.url, base());
+      assert.equal(up.requests.length, 3, "two re-prompts, then stop");
+      assert.match(text(r.events), /invalid tool call 3 times in a row .*could not parse its arguments .*"continue"/s);
+      assert.doesNotMatch(text(r.events), /failed after 1 attempt/);
+    } finally {
+      await px.close();
+    }
+  });
+
   test("API keys disabled in OpenWebUI -> actionable diagnostic, no retries", async () => {
     up.setModels([{ id: MODEL, owned_by: "ollama" }]);
     up.push({ kind: "status", status: 403, body: '{"detail":"Use of API key is not enabled in the environment."}' });

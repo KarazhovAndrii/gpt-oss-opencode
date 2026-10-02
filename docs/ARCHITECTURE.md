@@ -115,7 +115,10 @@ Verified from OpenWebUI 0.11.4 / Ollama 0.34.4 source and live against both:
   `num_ctx`, and requesting it per request is how a user without access to the server
   gets a large enough window. `numCtx` is then also the profile's `contextWindow` unless
   one is set (a smaller `numCtx` than the window is a config error: the server would cut).
-- Both routes: Ollama's `"error parsing tool call"` becomes a re-prompt to the model;
+- Both routes: Ollama's `"error parsing tool call"` is recovered when its `raw` text holds
+  one valid JSON object that only one tool fits (the model wrote its reasoning into the call
+  ahead of the arguments; the tool is inferred from the argument names, since the error does
+  not name it), and becomes a re-prompt to the model otherwise;
   `{"detail": …}` errors (string, object or list) are read; 401/403 and "model not
   found" produce setup hints; and **context truncation** is detected from the provider's
   `prompt_tokens` (Ollama's default `num_ctx` is 4096 below 23 GiB VRAM, far below
@@ -170,6 +173,9 @@ Verified from OpenWebUI 0.11.4 / Ollama 0.34.4 source and live against both:
    bare word (`glob` pattern or `grep` include without wildcard, separator or dot, such as
    `tests` or `config`) becomes `*word*`: OpenCode matches a bare word only as an exact
    file name, and gpt-oss uses it as a name search (one session: 9 of 14 globs found nothing).
+   A comma list in the same filters (`**/*.ts,**/*.tsx`) becomes one glob (`*.{ts,tsx}`, or
+   `{src/**/*.ts,**/*.cpp}`): OpenCode passes the filter to ripgrep as a single `--glob`, where
+   a comma is a literal character and the list matches no file.
 8. **Repair** invalid calls by re-prompting with the exact error as a tool result
    (bounded, default 2); a bare-JSON reply right after a rejection is accepted as
    that tool's arguments. On a Windows PowerShell 5.1 host, a `bash` command that cannot

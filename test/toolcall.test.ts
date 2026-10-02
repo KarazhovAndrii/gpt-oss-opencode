@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { validateToolCall, normalizePath, parseArgs, snapNearMissPath } from "../src/toolcall.ts";
+import fs from "node:fs";
+import { validateToolCall, normalizePath, parseArgs, snapNearMissPath, recoverUnparsedCall } from "../src/toolcall.ts";
 import { interpretHarmony } from "../src/harmony.ts";
 import { OPENCODE_TOOLS } from "./helpers/proxy.ts";
 
@@ -38,6 +39,40 @@ test("a bare-word file pattern becomes a name search (OpenCode matches it only a
   const grep = ok(validateToolCall({ name: "grep", args: { pattern: "pytest", include: "pytest" } }, OPENCODE_TOOLS));
   assert.deepEqual([grep.args.pattern, grep.args.include], ["pytest", "*pytest*"], "the search pattern itself is untouched");
   assert.match(grep.repairs.join("; "), /bare-word include "pytest" -> "\*pytest\*"/);
+});
+
+test("a comma-separated file pattern list becomes one glob (ripgrep reads the comma literally)", () => {
+  // Observed (OpenCode 2.x): include "**/*.ts,**/*.tsx,**/*.js" - every grep of the session found nothing.
+  const grep = ok(validateToolCall({ name: "grep", args: { pattern: "class", include: "**/*.ts,**/*.tsx,**/*.js" } }, OPENCODE_TOOLS));
+  assert.equal(grep.args.include, "*.{ts,tsx,js}");
+  assert.match(grep.repairs.join("; "), /glob list include "\*\*\/\*\.ts,\*\*\/\*\.tsx,\*\*\/\*\.js" -> "\*\.\{ts,tsx,js\}"/);
+  const g = (pattern: string) => ok(validateToolCall({ name: "glob", args: { pattern } }, OPENCODE_TOOLS)).args.pattern;
+  assert.equal(g("*.cpp, *.h, *.hpp"), "*.{cpp,h,hpp}");
+  assert.equal(g("*.{h,hpp},**/*.cpp"), "*.{h,hpp,cpp}", "nested braces are flattened (ripgrep rejects them)");
+  // One entry with a slash anchors the whole alternation at the root: the others get **/.
+  assert.equal(g("src/**/*.ts,*.cpp"), "{src/**/*.ts,**/*.cpp}");
+  assert.equal(g("CMakeLists.txt,*.cmake"), "{CMakeLists.txt,*.cmake}");
+  for (const p of ["*.{ts,tsx}", "**/*.cpp", "src/[a,b].txt", "{src,test}/**/*.ts"]) assert.equal(g(p), p, p);
+});
+
+test("a call is recovered from Ollama's parse error when its arguments follow the model's reasoning", () => {
+  const tools2 = JSON.parse(fs.readFileSync(new URL("./fixtures/opencode2-tools.json", import.meta.url), "utf8"));
+  const err = (raw: string) => `model produced unparseable tool-call arguments: error parsing tool call: raw='${raw}', err=invalid character 'W' looking for beginning of value`;
+  // Observed with OpenCode 2.x via OpenWebUI + Ollama (the turn was stopped after the third of these).
+  const args = '{"caseSensitive":true,"include":"**/*.ts,**/*.tsx,**/*.js","limit":200,"literal":true,"path":"C:\\\\Work\\\\app","pattern":"class"}';
+  const r = recoverUnparsedCall(err(`We need to analyze Meet_gp_appComponent class. Maybe the file name is something like meet_gp_app.component.ts? We should search for class definitions. Use grep for 'class' in project.${args}`), tools2);
+  assert.equal(r?.name, "grep");
+  assert.equal(r?.args, args);
+  assert.match(r?.dropped ?? "", /^We need to analyze .* in project\.$/);
+  assert.equal(recoverUnparsedCall(err(`Use {braces} in prose, then ${args}`), tools2)?.name, "grep", "a brace in the prose is skipped");
+  assert.equal(recoverUnparsedCall(err('{"path":"C:\\\\Work\\\\app\\\\main.cpp"}'), tools2)?.name, "read");
+  assert.equal(recoverUnparsedCall(err('Call it.{"name":"glob","arguments":{"pattern":"*.cpp"}}'), tools2)?.name, "glob", "a named envelope keeps its tool");
+  // Nothing to recover: placeholders, no JSON, a tool that is ambiguous, two candidate objects.
+  assert.equal(recoverUnparsedCall(err('{"caseSensitive":???,.."}'), tools2), undefined);
+  assert.equal(recoverUnparsedCall(err("We must provide JSON."), tools2), undefined);
+  assert.equal(recoverUnparsedCall(err('{"pattern":"*.cpp"}'), tools2), undefined, "glob or grep");
+  assert.equal(recoverUnparsedCall(err(`Either {"path":"a.cpp"} or ${args}`), tools2), undefined);
+  assert.equal(recoverUnparsedCall("HTTP 400: bad request", tools2), undefined);
 });
 
 test("a call to a 'search' tool is a grep, with query as its pattern (observed)", () => {
