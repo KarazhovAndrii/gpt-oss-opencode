@@ -1,6 +1,6 @@
 {
   "name": "gpt-oss-opencode",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Makes GPT-OSS (gpt-oss-20b, gpt-oss-120b) a reliable tool-calling coding agent inside OpenCode, with the model from any provider (harmony-aware OpenAI-compatible proxy).",
   "type": "module",
   "private": true,
