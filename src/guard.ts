@@ -58,6 +58,21 @@ function isTimedOutWait(s: Step): boolean {
   return s.name === "bash" && TIMED_OUT.test(s.result) && WAIT_LOOP.test(String((s.args as any)?.command ?? ""));
 }
 
+// GNU `timeout [options] DURATION command` (Git Bash), not Windows' `timeout /t N` (a pause).
+const INLINE_TIMEOUT = /(?:^|[\s;&|(])timeout\s+(?:(?:-[ks]\s*\S+|--[a-z-]+(?:=\S+)?|-[a-z]+)\s+)*(\d+(?:\.\d+)?)([smhd]?)(?=\s)/;
+const DURATION_MS: Record<string, number> = { "": 1000, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+
+/**
+ * How long a bash call asks to run: its timeout, or a longer `timeout N` wrapper in the
+ * command. Observed (gpt-oss-120b): a timed-out wait loop re-run as `timeout 300s bash -c
+ * '…'` with the default tool timeout; on Windows the loop outlived the killed wrapper.
+ */
+function requestedTimeout(args: unknown): number {
+  const tool = Number((args as any)?.timeout ?? 120_000);
+  const m = INLINE_TIMEOUT.exec(String((args as any)?.command ?? ""));
+  return m ? Math.max(tool, Number(m[1]) * DURATION_MS[m[2]]) : tool;
+}
+
 function stableStringify(v: unknown): string {
   if (Array.isArray(v)) return `[${v.map(stableStringify).join(",")}]`;
   if (v && typeof v === "object") {
@@ -117,7 +132,7 @@ export function findRedundant(steps: Step[], key: string, args?: unknown): Step 
   // After a wait loop timed out, a rewritten wait loop with a longer timeout is the same
   // escalation in other words (observed: `while ! grep …` timed out, then `until grep …`
   // with timeout 300000 blocked for 5 minutes).
-  if (name === "bash" && WAIT_LOOP.test(String((args as any)?.command ?? "")) && Number((args as any)?.timeout ?? 120_000) > 120_000) {
+  if (name === "bash" && WAIT_LOOP.test(String((args as any)?.command ?? "")) && requestedTimeout(args) > 120_000) {
     const waited = steps.findLast((s) => isTimedOutWait(s));
     if (waited && waited.key !== key) return waited;
   }

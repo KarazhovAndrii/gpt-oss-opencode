@@ -115,6 +115,13 @@ test("a wait loop that timed out gets no timeout escalation (observed in status-
   const c = analyzeTurn(turn(["bash", { command: loops[1], timeout: 120000 }, timedOut], ["bash", { command: "grep -oP 'job \\d+' status.txt" }, "job 7731"]));
   const rewritten = { command: "until grep -q READY status.txt; do sleep 5; done; echo done", timeout: 300000 };
   assert.ok(findRedundant(c.steps, canonicalKey("bash", rewritten), rewritten));
+  // the longer limit written into the command instead, with the default tool timeout (observed with gpt-oss-120b)
+  for (const command of [
+    `timeout 300s bash -c 'while true; do if grep -q "READY" status.txt; then grep -o "job [0-9]*" status.txt; break; fi; sleep 1; done'`,
+    "timeout -k 5 10m bash -c 'until grep -q READY status.txt; do sleep 5; done'",
+  ]) assert.ok(findRedundant(c.steps, canonicalKey("bash", { command }), { command }), command);
+  const shortInline = { command: "timeout 60 bash -c 'until grep -q READY status.txt; do sleep 5; done'" };
+  assert.equal(findRedundant(c.steps, canonicalKey("bash", shortInline), shortInline), undefined);
   // ...but a short re-check loop, or a first wait loop in the turn, is not blocked
   const short = { command: "until grep -q READY status.txt; do sleep 5; done", timeout: 30000 };
   assert.equal(findRedundant(c.steps, canonicalKey("bash", short), short), undefined);
