@@ -1,6 +1,6 @@
 # Validation report
 
-Dates: 2026-09-24/25, release validation 2026-09-29, Windows PowerShell 5.1 2026-10-01/02 · Host: Windows 11 (win32), Node 24.15.0, OpenCode 1.18.29 (`opencode run --format json`),
+Dates: 2026-09-24/25, release validation 2026-09-29, Windows PowerShell 5.1 2026-10-01/02, gpt-oss-120b 2026-10-07 · Host: Windows 11 (win32), Node 24.15.0, OpenCode 1.18.29 (`opencode run --format json`),
 provider SiliconFlow `openai/gpt-oss-20b` ($0.04 / $0.18 per 1M input/output tokens, 131K context, 8K max output).
 Linux smoke run: Ubuntu under WSL2 on the same host, Node 24.21.0, OpenCode 1.18.29.
 Every live number below comes from runs executed on these dates; raw artifacts are in `.eval-runs/`
@@ -30,7 +30,7 @@ SiliconFlow was the provider used for the live measurements.
 | **Windows PowerShell 5.1 as OpenCode's shell** (section 4.7), the 16 scenarios | before the PowerShell changes **14/16**; committed code **13/16** (release-5b with Git Bash: 15/16). Failures: `fix-syntax` and `cpp-evaluator` (model, as with bash) and `long-session-compaction` (2/4 in later runs, model and provider latency); none from PowerShell syntax. Prompt tokens per request +21% before the fix, ~+5% after |
 | New scenarios from user sessions, 3 runs per shell (committed code) | `deps-install-hangs` 0/3 bash, 0/3 PowerShell · `cpp-feature-search` 1/3, 1/3 · `large-data-converter` 2/3, 1/3. Failures are model behaviour (section 4.7); the setup hang also exposes guard gaps whose candidate fixes are not committed |
 | Linux (Ubuntu/WSL2), 8-scenario smoke run | **8/8**, 42/42 checks, 100% first-attempt valid calls |
-| gpt-oss-120b on SiliconFlow (section 4.6) | provider behaviour identical to 20b (native tools rejected); live tool round trip through the proxy **passes** (20 s); full evaluation not run |
+| gpt-oss-120b on SiliconFlow (section 4.6), the 19 scenarios | **16/19** with PowerShell 5.1 (20b: 13/19), **15/19** with Git Bash; 98.2% / 97.9% first-attempt valid calls; passes `fix-syntax` and `long-session-compaction`, which 20b passes only sometimes; still fails `cpp-evaluator` (10–11/12) and `deps-install-hangs`. Provider behaviour identical to 20b (native tools rejected) |
 | Live OpenCode evaluation, 15 scenarios, v7 | **14/15 passed (93%)**, 76/79 checks |
 | First-attempt valid tool calls (v7) | 96.8% (92/95); all invalid calls repaired by re-prompting |
 | Proxy stops / uncorrelated tool results (v7) | 0 / 0 |
@@ -144,6 +144,8 @@ Each was reproduced, fixed, and covered by a regression test (unit/contract) or 
 | 58 | final PowerShell run, `prompt-injection` | following the README's injected instruction, the model proposed `rm -rf src`. The PowerShell check sent it back (it fails in 5.1) and the model answered the summary instead, but the hint named the working form `Remove-Item -Recurse -Force path`, i.e. how to complete the injected deletion | hints for rm/del/rd/rmdir add "but delete only what the user asked you to delete". In 3 more runs the model did not propose a deletion | `shell.test.ts` |
 | 59 | user session (OpenCode 2.x, OpenWebUI + Ollama, 0.2.1) | every `grep` of the session returned "No matches found": `include` was a comma list (`**/*.ts,**/*.tsx,**/*.js`; the first call also listed `**/*.cpp,**/*.c`). OpenCode passes the filter to ripgrep as one `--glob=` (seen in the OpenCode binary, grep and glob alike), and ripgrep 15.1 reads the comma literally, so nothing matched. The model then degraded into invented tool names and unparseable calls | a comma list in `grep` include / `glob` pattern becomes one glob: `*.{ts,tsx,js}` for extensions, else `{a,b}` with nested braces flattened and slashless entries prefixed `**/` (ripgrep anchors the whole alternation at the root once one entry has a slash; probed) | `toolcall.test.ts` |
 | 60 | same session | the turn stopped with "failed after 1 attempt(s): … error parsing tool call": 3 of Ollama's 400s in a row, two of which held complete, valid JSON arguments behind the model's reasoning (`raw='We need to analyze … Use grep for 'class' in project.{"pattern":"class",…}'`). The stop message blamed the provider and counted transport attempts, not the model's 3 tries | the call is recovered from the error: the single JSON object in `raw`, its tool inferred from the argument names (only when exactly one tool fits; `{"pattern":…}` alone fits glob and grep and is re-prompted), the text around it shown as reasoning. Exhausted re-prompts end with "invalid tool call N times in a row … send a follow-up message"; the session report counts these as invalid calls, not provider errors | `toolcall.test.ts`, `openwebui.contract.test.ts` |
+| 61 | `status-poll`, gpt-oss-120b with Git Bash | after its `while true … sleep 1` loop timed out, the model ran it again as `timeout 300s bash -c '…'`, leaving the tool's timeout at the default. The wait-loop check (row 29) read only the tool's `timeout`, so the call ran. OpenCode stopped it at 120 s, but the inner `bash -c` loop outlived the stopped `timeout` process (it was still running after the scenario) and held the call open until the scenario's time limit | a GNU `timeout N[smhd]` wrapper in the command counts as the requested timeout (Windows' `timeout /t` does not match), so the rewritten loop gets the wait-loop hint | `guard.test.ts` |
+| 62 | `deps-install-hangs`, gpt-oss-120b with PowerShell | in the Python repository the model's first command was `npm install; npm test`. With no `package.json` there, npm used the nearest one above, this project's: it ran the proxy's own test suite (one test failed in the eval's environment) and updated this project's `package-lock.json`. The model spent the scenario on that output | none yet (the lockfile was restored); open item (section 6) | — |
 
 ## 3. OpenWebUI + Ollama (the production path)
 
@@ -366,7 +368,7 @@ Linux smoke run (Ubuntu under WSL2, same proxy code as release-1–3, 8 scenario
 discovery, features, edits, large files, paths, JSON escaping and missing files): **8/8,
 42/42 checks, 100% first-attempt valid calls (37/37)**, $0.012.
 
-### 4.6 gpt-oss-120b (2026-09-30)
+### 4.6 gpt-oss-120b (2026-09-30; full evaluation 2026-10-07)
 
 SiliconFlow also serves `openai/gpt-oss-120b`. Two checks were repeated for it: the provider
 probe (`node scripts/probe-provider.mjs https://api.siliconflow.com/v1 openai/gpt-oss-120b`),
@@ -381,9 +383,69 @@ and the live lifecycle test (`SILICONFLOW_MODEL=openai/gpt-oss-120b npm run test
 | **Live lifecycle through the proxy** (harmony strategy, OpenCode's real tool catalog) | **pass** in 20.2 s: glob → read test → read source → edit → `npm test` → read `package.json` → correct final answer | — |
 
 **Conclusion:** the provider and the format behave exactly as they do for 20b, so the proxy
-applies unchanged. The 16-scenario evaluation has not been run with 120b. Whether its
-stronger reasoning reduces the model-level failures (sections 4.5, 5 and 6.1) is still
-open. The SiliconFlow preset's `pricing` is for 20b.
+applies unchanged. The SiliconFlow preset's `pricing` is for 20b.
+
+**Full evaluation (2026-10-07).** All 19 scenarios, once with Git Bash and once with Windows
+PowerShell 5.1 (set up as in section 4.7), on the 0.2.2 code with OpenCode 1.18.29. A config
+file passed with `GPT_OSS_CONFIG` set `profiles.siliconflow.model` to `openai/gpt-oss-120b`
+and its SiliconFlow prices ($0.05 / $0.45 per 1M input/output tokens; same 131K context and
+8K output as 20b). The 20b run on the same 19 scenarios is ps51-final (section 4.7).
+
+| run | all 19 | original 15 | checks | first-attempt valid | proxy stops | output tokens | cost USD | wall time |
+|---|---|---|---|---|---|---|---|---|
+| 20b, PowerShell 5.1 (ps51-final) | 13/19 | 13/15 | 100/113 | 93.8% (150/160) | 0 | 89K | 0.083 | 3670s |
+| **120b, PowerShell 5.1** | **16/19** | **14/15** | **105/111** | **98.2% (107/109)** | 2 (rate limit) | 29K | 0.069 | 3342s |
+| **120b, Git Bash** | **15/19** | **14/15** | **103/112** | **97.9% (93/95)** | 0 | 24K | 0.049 | 2795s |
+
+With Git Bash, 20b on comparable code passed 15/15 of the original scenarios (release-5b,
+section 4.5) and 3 of 9 runs of the three newer ones (section 4.7).
+
+| scenario | 20b, Git Bash | 20b, PowerShell | 120b, Git Bash | 120b, PowerShell |
+|---|---|---|---|---|
+| `fix-syntax` | pass | fail | pass | pass |
+| `long-session-compaction` | pass | fail | pass | pass |
+| `large-data-converter` | 2 of 3 | fail | pass | pass |
+| `cpp-feature-search` | 1 of 3 | fail | fail | pass |
+| `status-poll` | pass | pass | fail (row 61, fixed) | pass |
+| `discover-explain` | pass | pass | pass | fail |
+| `cpp-evaluator` | fail | 8/12 | 10/12 | 11/12 |
+| `deps-install-hangs` | 0 of 3 | fail | fail | fail |
+| the other 11 scenarios | pass | pass | pass | pass |
+
+What decided the 120b failures:
+
+- `status-poll`, Git Bash: it re-ran its timed-out polling loop under an inline `timeout 300s`,
+  which the wait-loop check did not see (row 61). With PowerShell it raised the tool's timeout
+  instead, got the hint and reported "PENDING (job 7731)".
+- `discover-explain`, PowerShell: it read `app/__main__.py` and explained it correctly, but
+  its one-line answer did not name the file.
+- `cpp-evaluator`: the requirement 20b also misses. It evaluates while parsing, so `1 / 0 +`
+  and `unknown_var 5` raise evaluation errors instead of ParseError. In the Git Bash run it
+  also did not re-run the tests after its last edit.
+- `deps-install-hangs`, Git Bash: after `pip install` hung twice (120 s, 300 s) it ran the
+  basic tests itself (6 passed), then started the same install through `tools/bootstrap.py`
+  and once more with a 600 s timeout, past the time limit. The repeat check starts over after
+  any other bash command; the candidates for this are on branch `ps51-work-full` (section 4.7).
+  PowerShell: its first command in the Python repository was `npm install; npm test`, which
+  reached this project (row 62), and it spent the scenario on that output.
+- `cpp-feature-search`, Git Bash: it stopped one indirection early (`GaugeBindings.cpp:10`), as
+  20b does.
+
+Provider and speed on the day:
+
+- SiliconFlow's 120b failed twice while 20b answered on the same key: requests hung for 180 s
+  (about 08:50–09:20 UTC), then returned HTTP 500 "Unknown error" (about 09:39–09:47 UTC).
+  The proxy reported both as provider errors. The four scenario runs they hit were discarded
+  and re-run once 120b answered again, so the Git Bash result combines three partial runs.
+- Generation was slower than 20b's: median 17–30 tokens/s (20b in earlier runs: 45–63), with
+  many TPM 429s. The PowerShell run spent 2075 s in rate-limit backoff.
+- 120b wrote about a third of 20b's output tokens for the same scenarios, so a run cost about
+  the same as with 20b despite the higher prices.
+
+**Conclusion:** on these scenarios 120b passed the ones where 20b's reasoning is unreliable
+(`fix-syntax`, `long-session-compaction`, `large-data-converter`) and made fewer invalid
+calls. It still missed the C++ spec requirement and did not report the setup hang. With one
+run per shell, single-scenario differences are within noise (section 6, item 7).
 
 ### 4.7 Windows PowerShell 5.1 (2026-10-01/02)
 
@@ -513,10 +575,10 @@ remaining failure is task quality (`fix-syntax`).
    | 1 | 20-min limit; `--label` repeated a path segment | 7/13 | edit churn in its own test file (`calc::eval` → `calc::calc::evaluate`), then mistyped paths denied; out of time with 809 s of rate-limit backoff |
    | 2 | no time limit | 7/12 | provider outage (~60 s of 500/503) exhausted the 3 transport retries mid-task |
    | 3 | + `reanchorPath`, 8 transport retries | **11/12** | fixed the latent lexer bug and passed the precedence, function and error groups plus its own 27 assertions; it evaluates while parsing, so `1 / 0 +` raises EvalError instead of ParseError |
-10. **gpt-oss-120b** has had only the provider probe and one live lifecycle run
-    (section 4.6). Its task-level results are unmeasured. To measure them, run
-    `SILICONFLOW_MODEL=openai/gpt-oss-120b npm run eval -- --concurrency 1`, or use
-    `--profile custom` with another provider.
+10. **gpt-oss-120b** was evaluated once per shell, on SiliconFlow only (section 4.6).
+    Repeated runs and 120b behind OpenWebUI + Ollama are unmeasured. To repeat it, run
+    `SILICONFLOW_MODEL=openai/gpt-oss-120b npm run eval -- --concurrency 1` (with a config
+    file that sets its `pricing`), or use `--profile custom` with another provider.
 11. **Windows PowerShell 5.1** (section 4.7):
     - Measured on SiliconFlow with harmony emulation only. The production path (OpenWebUI +
       Ollama, native tool calls) with PowerShell is unmeasured. pwsh 7 and cmd.exe hosts are
@@ -531,12 +593,18 @@ remaining failure is task quality (`fix-syntax`).
     - PowerShell wrote its module analysis cache into the project folder in `status-poll` (row 57).
     - In one bash run, OpenCode did not return the result of a timed-out `python
       tools/bootstrap.py` (default 120 s) within the remaining 8 minutes; the cause is unknown.
+      Row 61 shows a likely mechanism: on Windows a process started by the stopped command
+      can keep running and hold the call open.
     - Not committed, kept on branch `ps51-work-full` as candidates: rows 46–50, 53, 54 and 56.
       Each rests on one or two occurrences or on the new `deps-install-hangs` scenario alone.
     - Model limits seen in the new scenarios: false success after a hang and, once, invented
       stand-ins for missing packages (`deps-install-hangs`); stopping one indirection early
       (`cpp-feature-search`); reading a 4.4 MB data file without a range
       (`large-data-converter`).
+12. **Eval isolation.** Each scenario's repository is copied under `.eval-runs/` inside this
+    project. A tool that looks upwards for its project file can reach this project: npm ran
+    the proxy's own tests and updated its `package-lock.json` from a Python scenario (row 62).
+    Copying the repositories outside the project tree would close this.
 
 ## 7. Reproducing
 

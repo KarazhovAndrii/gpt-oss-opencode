@@ -68,8 +68,8 @@ The agent handles everyday coding tasks well; larger or subtler work still needs
 review (see [What to expect](#what-to-expect)).
 
 **At a glance:** works with any OpenAI-compatible provider (generic `custom` profile, plus
-tested presets for SiliconFlow and OpenWebUI) · gpt-oss-20b fully evaluated, gpt-oss-120b
-verified end to end ([model sizes](#model-sizes-20b-and-120b)) · set up in about a minute
+tested presets for SiliconFlow and OpenWebUI) · gpt-oss-20b and gpt-oss-120b both evaluated
+on live coding scenarios ([model sizes](#model-sizes-20b-and-120b)) · set up in about a minute
 with `npm run setup` ([quick setup](#quick-setup)) · Node.js ≥ 22.18, no runtime
 dependencies · MIT license.
 
@@ -489,14 +489,16 @@ often the model itself makes mistakes, and in the hardware they need.
 
 | | gpt-oss-20b | gpt-oss-120b |
 |---|---|---|
-| **Verified here** | Full live evaluation: runs of 16–19 scenarios with Git Bash and with Windows PowerShell 5.1, a Linux run, and the C++ task | Provider check, and an end-to-end tool round trip through the proxy (find files, read, edit, run the tests, answer). The full evaluation has not been run yet. |
+| **Verified here** | Full live evaluation: runs of 16–19 scenarios with Git Bash and with Windows PowerShell 5.1, a Linux run, and the C++ task | Full live evaluation on SiliconFlow: the 19 scenarios, once with Git Bash and once with Windows PowerShell 5.1, plus the provider check and the tool round trip |
 | **Integration problems** (tool calling rejected by the provider, gateway payload losses, OpenCode prompt selection) | Present; solved by the proxy | The same. SiliconFlow rejects native tool calls for 120b just as for 20b, and the proxy's emulation works unchanged. |
-| **Model mistakes** (malformed calls, mistyped paths, loops, misread specs) | Measured; see [What to expect](#what-to-expect) | Expected to be less frequent, since 120b is the stronger model; not measured yet. The proxy's guards apply either way. |
+| **Model mistakes** (malformed calls, mistyped paths, loops, misread specs) | Measured; see [What to expect](#what-to-expect) | Fewer: 16/19 scenarios with PowerShell (20b: 13/19) and 15/19 with Git Bash, about 98% of tool calls valid on the first try. It diagnosed the misleading bug that 20b gets right about half the time, but still missed the C++ spec requirement and did not report a hanging setup step. One run per shell. |
+| **Speed** | On SiliconFlow, about 45–63 tokens/s | On SiliconFlow, about 17–30 tokens/s, but it writes about a third as many tokens for the same task |
 | **Self-hosting** | About 14 GB; a 16 GB GPU | About 65 GB; an 80 GB-class GPU |
 | **How to select it** | The default model ids | `CUSTOM_MODEL=openai/gpt-oss-120b`, `SILICONFLOW_MODEL=openai/gpt-oss-120b`, or an OpenWebUI entry based on `gpt-oss:120b` |
 
 The SiliconFlow preset's cost figures (`pricing` in the proxy, `cost` in `opencode.json`)
-are 20b prices. When you use 120b, set its prices there so the cost reports are right.
+are 20b prices. When you use 120b, set its prices there so the cost reports are right
+(SiliconFlow, October 2026: $0.05 per 1M input tokens and $0.45 per 1M output tokens).
 
 ### Checking a new provider
 
@@ -843,8 +845,8 @@ and context truncation. Other forms: `--session ses_abc`, a log directory, or `-
 The proxy makes GPT-OSS's tool use reliable; it cannot make the model smarter. The numbers
 below were measured with **gpt-oss-20b** on SiliconFlow. The model is the same with every
 provider, so task quality should carry over, while speed depends on your provider.
-gpt-oss-120b is the stronger model, so expect fewer of the mistakes listed here, but that
-has not been measured yet. Full results are in the
+gpt-oss-120b made fewer of the mistakes listed here on the same scenarios, but not none
+([model sizes](#model-sizes-20b-and-120b)). Full results are in the
 [validation report](docs/VALIDATION_REPORT.md).
 
 - **Good at:** finding and explaining code, small features with tests, targeted edits and
@@ -859,7 +861,7 @@ has not been measured yet. Full results are in the
   minute), simple tasks took 1–3 minutes and larger ones 5–20. On your own server it
   depends on the GPU.
 - **One tool call per step** with the `harmony` strategy (no parallel calls).
-- **Tested providers:** SiliconFlow (gpt-oss-20b fully; gpt-oss-120b end to end), and
+- **Tested providers:** SiliconFlow (gpt-oss-20b and gpt-oss-120b), and
   OpenWebUI + Ollama with a small stand-in model. GPT-OSS behind OpenWebUI, and all other
   providers, are not verified yet: check them as described in
   [Checking a new provider](#checking-a-new-provider).
